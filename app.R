@@ -3147,6 +3147,11 @@ ui <- fluidPage(
 )
 
 # ==================================================
+# V53 — USERS DIRECTORY ACTIVE-FLAG FIX
+# Built directly on V52. Fixes Users sheet active-user loading only.
+# ==================================================
+
+# ==================================================
 # V52 — USER / ORGANIZATION / ROLE / DATA FOUNDATION
 # Built directly on V51. Development identity only; not authentication.
 # ==================================================
@@ -3448,32 +3453,111 @@ server <- function(input, output, session) {
   load_user_directory <- function(){
     tryCatch({
       d<-as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Users",range="A1:F1001",col_names=TRUE),
+        googlesheets4::range_read(
+          ss=SHEET_URL,
+          sheet="Users",
+          range="A1:F1001",
+          col_names=TRUE
+        ),
         stringsAsFactors=FALSE
       )
+      
       d<-v49_normalize_sheet_data(d,"generic")
-      if(nrow(d)>0&&"User_ID"%in%names(d))d<-d[!is.na(d$User_ID)&trimws(as.character(d$User_ID))!="",,drop=FALSE]
-      if(nrow(d)>0&&"Active"%in%names(d)){
-        a<-toupper(trimws(as.character(d$Active)))
-        d<-d[is.na(a)|a==""|a%in%c("TRUE","T","1","YES","Y"),,drop=FALSE]
+      
+      if(nrow(d)>0&&"User_ID"%in%names(d)){
+        d<-d[
+          !is.na(d$User_ID) &
+            trimws(as.character(d$User_ID))!="",
+          ,
+          drop=FALSE
+        ]
       }
+      
+      # V53: robustly interpret Active regardless of whether Google Sheets
+      # returns TRUE/FALSE, logical, numeric, or text.
+      if(nrow(d)>0&&"Active"%in%names(d)){
+        active_raw<-d$Active
+        
+        if(is.logical(active_raw)){
+          active_keep<-is.na(active_raw)|active_raw
+        }else{
+          active_chr<-toupper(trimws(as.character(active_raw)))
+          active_keep<-
+            is.na(active_chr) |
+            active_chr=="" |
+            active_chr%in%c("TRUE","T","1","YES","Y","ACTIVE")
+        }
+        
+        d<-d[active_keep,,drop=FALSE]
+      }
+      
       user_directory(d)
+      
       if(nrow(d)>0){
-        labs<-paste0(as.character(d$Display_Name)," — ",if("Role"%in%names(d))as.character(d$Role)else"Coach")
-        vals<-as.character(d$User_ID);names(vals)<-labs
+        display_names<-if("Display_Name"%in%names(d)){
+          as.character(d$Display_Name)
+        }else{
+          as.character(d$User_ID)
+        }
+        
+        roles<-if("Role"%in%names(d)){
+          as.character(d$Role)
+        }else{
+          rep("Coach",nrow(d))
+        }
+        
+        labs<-paste0(display_names," — ",roles)
+        vals<-as.character(d$User_ID)
+        names(vals)<-labs
+        
         cur<-active_user_id()
+        
         if(is.null(cur)||!nzchar(cur)||!cur%in%vals){
           default_name<-trimws(setting_chr("Default_Charting_User","Nate Marko"))
-          hit<-which(trimws(as.character(d$Display_Name))==default_name)
-          cur<-if(length(hit)>0)as.character(d$User_ID[hit[1]])else vals[1]
+          
+          hit<-which(
+            trimws(display_names)==default_name
+          )
+          
+          if(length(hit)>0){
+            cur<-as.character(d$User_ID[hit[1]])
+          }else{
+            cur<-as.character(d$User_ID[1])
+          }
+          
           active_user_id(cur)
         }
-        updateSelectInput(session,"setting_active_user",choices=vals,selected=active_user_id())
+        
+        updateSelectInput(
+          session,
+          "setting_active_user",
+          choices=vals,
+          selected=active_user_id()
+        )
+        
       }else{
-        updateSelectInput(session,"setting_active_user",choices=c("No active users"=""),selected="")
+        
+        active_user_id("")
+        
+        updateSelectInput(
+          session,
+          "setting_active_user",
+          choices=c("No active users"=""),
+          selected=""
+        )
       }
+      
       TRUE
-    },error=function(e){settings_message(paste0("Users load error: ",e$message));FALSE})
+      
+    },error=function(e){
+      settings_message(
+        paste0(
+          "Users load error: ",
+          e$message
+        )
+      )
+      FALSE
+    })
   }
   
   output$identity_status<-renderUI({
