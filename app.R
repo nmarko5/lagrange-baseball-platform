@@ -3153,6 +3153,9 @@ ui <- fluidPage(
 )
 
 # ==================================================
+# V48 — CONNECT CLOUD BACKEND CACHE / QUOTA FIX
+# ==================================================
+# ==================================================
 # SERVER
 # ==================================================
 
@@ -3843,34 +3846,21 @@ server <- function(input, output, session) {
       
       {
         
-        # Read Sessions directly from Google Sheets so Live Charting uses the
-        # same fresh source as the Sessions admin page. This prevents newly
-        # created sessions from being missing from the Live Charting dropdown.
-        sessions_data <- as.data.frame(
-          googlesheets4::range_read(
-            ss = SHEET_URL,
-            sheet = "Sessions",
-            range = "A1:L1001",
-            col_names = TRUE
-          ),
-          stringsAsFactors = FALSE
-        )
+        # V48: render from the in-memory backend snapshot.
+        sessions_data <- sessions_admin_sessions()
         
         if (
+          is.null(sessions_data) ||
           nrow(sessions_data) == 0 ||
           !"Session_ID" %in% names(sessions_data)
         ) {
           
-          session_lookup(
-            data.frame()
-          )
+          session_lookup(data.frame())
           
           updateSelectInput(
             session,
             "session_select",
-            choices = c(
-              "No Sessions Yet" = ""
-            ),
+            choices = c("No Sessions Yet" = ""),
             selected = ""
           )
           
@@ -3879,67 +3869,45 @@ server <- function(input, output, session) {
         
         sessions_data <- sessions_data[
           !is.na(sessions_data$Session_ID) &
-            sessions_data$Session_ID != "",
+            trimws(as.character(sessions_data$Session_ID)) != "",
+          ,
+          drop = FALSE
         ]
         
-        session_lookup(
-          sessions_data
-        )
+        session_lookup(sessions_data)
         
         if (nrow(sessions_data) == 0) {
-          
           updateSelectInput(
             session,
             "session_select",
-            choices = c(
-              "No Sessions Yet" = ""
-            ),
+            choices = c("No Sessions Yet" = ""),
             selected = ""
           )
-          
           return()
         }
         
         session_labels <- paste0(
-          
           sessions_data$Session_Date,
-          
           " — ",
-          
           sessions_data$Session_Name,
-          
           ifelse(
-            is.na(sessions_data$Status),
+            is.na(sessions_data$Status) |
+              trimws(as.character(sessions_data$Status)) == "",
             "",
-            paste0(
-              " [",
-              sessions_data$Status,
-              "]"
-            )
+            paste0(" [", sessions_data$Status, "]")
           )
-          
         )
         
-        choices <- sessions_data$Session_ID
-        
+        choices <- as.character(sessions_data$Session_ID)
         names(choices) <- session_labels
         
         if (
           !is.null(select_session_id) &&
-          select_session_id %in%
-          sessions_data$Session_ID
+          select_session_id %in% as.character(sessions_data$Session_ID)
         ) {
-          
           selected_id <- select_session_id
-          
         } else {
-          
-          selected_id <-
-            tail(
-              sessions_data$Session_ID,
-              1
-            )
-          
+          selected_id <- tail(as.character(sessions_data$Session_ID), 1)
         }
         
         updateSelectInput(
@@ -3952,14 +3920,7 @@ server <- function(input, output, session) {
       },
       
       error = function(e) {
-        
-        save_status(
-          paste0(
-            "Session load error: ",
-            e$message
-          )
-        )
-        
+        save_status(paste0("Session load error: ", e$message))
       }
       
     )
@@ -4096,6 +4057,8 @@ server <- function(input, output, session) {
               session_name
             )
           )
+          
+          refresh_sessions_admin_data()
           
           load_sessions(
             select_session_id =
@@ -5010,13 +4973,11 @@ server <- function(input, output, session) {
   }
   
   load_pitcher_report_data <- function() {
-    ensure_inning_column()
-    ensure_bullpen_columns()
     tryCatch({
-      d <- googlesheets4::range_read(ss=SHEET_URL,sheet="Pitches",range="A1:AL5001",col_names=TRUE)
+      d <- sessions_admin_pitches()
+      if(is.null(d)) d <- data.frame()
       d <- as.data.frame(d,stringsAsFactors=FALSE)
       
-      # Drop completely empty/preallocated rows before any report logic.
       if(nrow(d)>0){
         meaningful_cols <- intersect(
           c("Session_ID","Pitcher_ID","Batter_ID","Pitch_Type","Pitch_Result","Timestamp","Location_X","Location_Y"),
@@ -5035,16 +4996,25 @@ server <- function(input, output, session) {
       if (!"Inning" %in% names(d) && ncol(d)>=30) names(d)[30] <- "Inning"
       if (!"Half_Inning" %in% names(d) && ncol(d)>=31) names(d)[31] <- "Half_Inning"
       if (!"Outs_Before" %in% names(d) && ncol(d)>=32) names(d)[32] <- "Outs_Before"
-      pitcher_report_pitches_raw(d); pitcher_report_error(NULL)
-    },error=function(e){ pitcher_report_pitches_raw(data.frame()); pitcher_report_error(e$message) })
+      
+      pitcher_report_pitches_raw(d)
+      pitcher_report_error(NULL)
+    },error=function(e){
+      pitcher_report_pitches_raw(data.frame())
+      pitcher_report_error(e$message)
+    })
+    
     tryCatch({
-      p <- googlesheets4::range_read(ss=SHEET_URL,sheet="Plate_Appearances",range="A1:Z5001",col_names=TRUE)
+      p <- sessions_admin_pas()
+      if(is.null(p)) p <- data.frame()
       pitcher_report_pa_raw(as.data.frame(p,stringsAsFactors=FALSE))
-    },error=function(e){ pitcher_report_pa_raw(data.frame()) })
+    },error=function(e){
+      pitcher_report_pa_raw(data.frame())
+    })
   }
   
   observeEvent(TRUE,{ load_pitcher_report_data() },once=TRUE)
-  observeEvent(input$refresh_pitcher_report,{ load_pitcher_report_data() })
+  observeEvent(input$refresh_pitcher_report,{ refresh_sessions_admin_data(); load_sessions(select_session_id=current_session_id()); load_pitcher_report_data() })
   observeEvent(input$pitcher_report_pitcher,{ load_pitcher_report_data() },ignoreInit=TRUE)
   
   observe({
@@ -5445,7 +5415,7 @@ server <- function(input, output, session) {
   
   output$leaderboard_podium<-renderUI({df<-lb_sorted();if(nrow(df)==0)return(div(class="report-breakdown-note","No rankings available."));m<-input$leaderboard_rank_metric;if(is.null(m)||!m%in%names(df))m<-"Overall_Grade";top<-head(df,3);cards<-lapply(seq_len(nrow(top)),function(i){r<-top[i,,drop=FALSE];div(class="leaderboard-podium-place",div(class="leaderboard-podium-rank",paste0("#",i)),div(class="leaderboard-podium-name",lb_link(r$Player_ID,r$Player,input$leaderboard_type)),div(class="leaderboard-podium-value",lb_display(m,r[[m]][1])))});div(class="leaderboard-podium-grid",cards)})
   observeEvent(input$leaderboard_open_player,{x<-as.character(input$leaderboard_open_player);parts<-strsplit(x,"\\|")[[1]];if(length(parts)<2)return();tp<-parts[1];id<-paste(parts[-1],collapse="|");if(identical(tp,"Pitcher")){updateSelectInput(session,"pitcher_report_pitcher",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Pitcher Report",sidebar="PITCHER REPORTS"))}else{updateSelectInput(session,"report_batter",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Hitter Report",sidebar="HITTER'S REPORTS"))}})
-  observeEvent(input$leaderboard_refresh,{load_pitcher_report_data();load_report_pitches()})
+  observeEvent(input$leaderboard_refresh,{refresh_sessions_admin_data();load_sessions(select_session_id=current_session_id());load_pitcher_report_data();load_report_pitches()})
   
   # ==================================================
   # PITCHER REPORT - BULLPEN PROGRESS
@@ -6511,6 +6481,8 @@ server <- function(input, output, session) {
   observeEvent(
     input$team_report_refresh,
     {
+      refresh_sessions_admin_data()
+      load_sessions(select_session_id=current_session_id())
       load_pitcher_report_data()
       load_report_pitches()
     }
@@ -7767,46 +7739,32 @@ server <- function(input, output, session) {
     
     tryCatch(
       {
-        pitches_data <- gs_read_pitches(
-          sheet_url = SHEET_URL
-        )
+        pitches_data <- sessions_admin_pitches()
+        if(is.null(pitches_data)) pitches_data <- data.frame()
         
         report_pitches(
-          pitches_data
+          as.data.frame(pitches_data, stringsAsFactors = FALSE)
         )
         
         report_load_error(NULL)
       },
       error = function(e) {
-        report_pitches(
-          data.frame()
-        )
-        report_load_error(
-          e$message
-        )
+        report_pitches(data.frame())
+        report_load_error(e$message)
       }
     )
     
     tryCatch(
       {
-        pa_data <- googlesheets4::range_read(
-          ss = SHEET_URL,
-          sheet = "Plate_Appearances",
-          range = "A1:Z5001",
-          col_names = TRUE
-        )
+        pa_data <- sessions_admin_pas()
+        if(is.null(pa_data)) pa_data <- data.frame()
         
         report_plate_appearances(
-          as.data.frame(
-            pa_data,
-            stringsAsFactors = FALSE
-          )
+          as.data.frame(pa_data, stringsAsFactors = FALSE)
         )
       },
       error = function(e) {
-        report_plate_appearances(
-          data.frame()
-        )
+        report_plate_appearances(data.frame())
       }
     )
   }
@@ -7816,6 +7774,8 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
   
   observeEvent(input$refresh_report, {
+    refresh_sessions_admin_data()
+    load_sessions(select_session_id=current_session_id())
     load_report_pitches()
   })
   
@@ -13053,7 +13013,14 @@ server <- function(input, output, session) {
     compact_pitches_sheet_if_needed()
     compact_plate_appearances_sheet_if_needed()
     load_app_settings(update_ui=TRUE)
+    
+    # V48: one backend snapshot hydrates Sessions, Pitches and PAs.
+    # Reports and leaderboards calculate from memory instead of repeatedly
+    # hitting the Google Sheets API for every reactive UI change.
     refresh_sessions_admin_data()
+    load_sessions()
+    load_report_pitches()
+    load_pitcher_report_data()
   },once=TRUE)
   
 }
