@@ -3112,6 +3112,13 @@ ui <- fluidPage(
                       "It is not authentication while the Connect Cloud app remains public.")
               ),
               div(class="admin-card",
+                  div(class="admin-title","Baseball Year / Period"),
+                  uiOutput("season_period_status"),
+                  div(class="admin-note",
+                      "Fall and Spring are stored as separate periods inside the same baseball year. ",
+                      "Only periods marked as official-stat periods count toward official spring/career statistics.")
+              ),
+              div(class="admin-card",
                   div(class="admin-title","Multi-User / Server Readiness"),
                   uiOutput("settings_multi_user_status"),
                   div(class="connection-card",uiOutput("settings_connection_status")),
@@ -3145,6 +3152,12 @@ ui <- fluidPage(
     
   )
 )
+
+# ==================================================
+# V54 — SEASONS / PERIODS / SUBSCRIPTIONS / ROSTER MEMBERSHIPS
+# Built directly on V53.
+# Fall and Spring are separate periods; Fall 2026 is non-official and Spring 2027 is official.
+# ==================================================
 
 # ==================================================
 # V53 — USERS DIRECTORY ACTIVE-FLAG FIX
@@ -3327,6 +3340,10 @@ server <- function(input, output, session) {
   settings_message <- reactiveVal(NULL)
   user_directory <- reactiveVal(data.frame())
   active_user_id <- reactiveVal("")
+  seasons_directory <- reactiveVal(data.frame())
+  periods_directory <- reactiveVal(data.frame())
+  subscriptions_directory <- reactiveVal(data.frame())
+  roster_memberships_directory <- reactiveVal(data.frame())
   sessions_admin_sessions <- reactiveVal(data.frame())
   sessions_admin_pitches <- reactiveVal(data.frame())
   sessions_admin_pas <- reactiveVal(data.frame())
@@ -3416,6 +3433,359 @@ server <- function(input, output, session) {
     googlesheets4::sheet_append(ss=SHEET_URL,data=one_row_df(values),sheet=sheet_name)
     invisible(TRUE)
   }
+  ensure_season_architecture_sheets <- function(){
+    tryCatch({
+      existing <- googlesheets4::sheet_names(SHEET_URL)
+      
+      specs <- list(
+        Seasons=c(
+          "Season_ID","Organization_ID","Season_Name","Start_Date","End_Date","Active"
+        ),
+        Periods=c(
+          "Period_ID","Organization_ID","Season_ID","Period_Name","Period_Type",
+          "Start_Date","End_Date","Counts_Toward_Official_Stats","Active"
+        ),
+        Subscriptions=c(
+          "Subscription_ID","Organization_ID","Season_ID","Access_Status",
+          "Start_Date","End_Date","Notes"
+        ),
+        Roster_Memberships=c(
+          "Roster_Membership_ID","Organization_ID","Season_ID","Player_ID",
+          "Status","Class_Year","Jersey_Number","Primary_Position"
+        )
+      )
+      
+      for(sheet_name in names(specs)){
+        if(!sheet_name %in% existing){
+          googlesheets4::sheet_add(SHEET_URL,sheet_name)
+        }
+        cols <- specs[[sheet_name]]
+        header <- as.data.frame(
+          as.list(setNames(cols,cols)),
+          stringsAsFactors=FALSE,
+          check.names=FALSE
+        )
+        googlesheets4::range_write(
+          ss=SHEET_URL,
+          data=header,
+          sheet=sheet_name,
+          range=paste0("A1:",LETTERS[length(cols)],"1"),
+          col_names=FALSE
+        )
+      }
+      
+      # Extend Sessions with explicit season/period keys.
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=data.frame(Season_ID="Season_ID",Period_ID="Period_ID",stringsAsFactors=FALSE),
+        sheet="Sessions",
+        range="M1:N1",
+        col_names=FALSE
+      )
+      
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Season architecture setup error: ",e$message))
+      FALSE
+    })
+  }
+  
+  seed_lagrange_2026_27_architecture <- function(){
+    tryCatch({
+      org <- setting_chr("Organization_ID","LAGRANGE")
+      
+      # Seasons
+      s <- as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      )
+      if(!("LAGRANGE_2026_27" %in% as.character(s$Season_ID))){
+        googlesheets4::sheet_append(
+          ss=SHEET_URL,
+          data=data.frame(
+            Season_ID="LAGRANGE_2026_27",
+            Organization_ID=org,
+            Season_Name="2026-27",
+            Start_Date="2026-08-01",
+            End_Date="2027-06-30",
+            Active="TRUE",
+            stringsAsFactors=FALSE
+          ),
+          sheet="Seasons"
+        )
+      }
+      
+      # Periods
+      p <- as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      )
+      existing_periods <- if("Period_ID"%in%names(p)) as.character(p$Period_ID) else character(0)
+      
+      period_seed <- data.frame(
+        Period_ID=c("LAGRANGE_FALL_2026","LAGRANGE_SPRING_2027"),
+        Organization_ID=c(org,org),
+        Season_ID=c("LAGRANGE_2026_27","LAGRANGE_2026_27"),
+        Period_Name=c("Fall 2026","Spring 2027"),
+        Period_Type=c("Fall","Spring"),
+        Start_Date=c("2026-08-01","2027-01-01"),
+        End_Date=c("2026-12-31","2027-06-30"),
+        Counts_Toward_Official_Stats=c("FALSE","TRUE"),
+        Active=c("TRUE","TRUE"),
+        stringsAsFactors=FALSE
+      )
+      
+      for(i in seq_len(nrow(period_seed))){
+        if(!period_seed$Period_ID[i] %in% existing_periods){
+          googlesheets4::sheet_append(
+            ss=SHEET_URL,
+            data=period_seed[i,,drop=FALSE],
+            sheet="Periods"
+          )
+        }
+      }
+      
+      # Development subscription record. This does not charge or enforce billing yet.
+      sub <- as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      )
+      existing_subs <- if("Subscription_ID"%in%names(sub)) as.character(sub$Subscription_ID) else character(0)
+      if(!"LAGRANGE_SUB_2026_27" %in% existing_subs){
+        googlesheets4::sheet_append(
+          ss=SHEET_URL,
+          data=data.frame(
+            Subscription_ID="LAGRANGE_SUB_2026_27",
+            Organization_ID=org,
+            Season_ID="LAGRANGE_2026_27",
+            Access_Status="Development",
+            Start_Date="2026-08-01",
+            End_Date="2027-06-30",
+            Notes="Development access — billing enforcement not enabled.",
+            stringsAsFactors=FALSE
+          ),
+          sheet="Subscriptions"
+        )
+      }
+      
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Season architecture seed error: ",e$message))
+      FALSE
+    })
+  }
+  
+  load_season_architecture <- function(){
+    tryCatch({
+      org <- current_org_id()
+      
+      s <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(s)>0 && "Organization_ID"%in%names(s)){
+        s<-s[trimws(as.character(s$Organization_ID))==org,,drop=FALSE]
+      }
+      seasons_directory(s)
+      
+      p <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(p)>0 && "Organization_ID"%in%names(p)){
+        p<-p[trimws(as.character(p$Organization_ID))==org,,drop=FALSE]
+      }
+      periods_directory(p)
+      
+      sub <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(sub)>0 && "Organization_ID"%in%names(sub)){
+        sub<-sub[trimws(as.character(sub$Organization_ID))==org,,drop=FALSE]
+      }
+      subscriptions_directory(sub)
+      
+      rm <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H5001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(rm)>0 && "Organization_ID"%in%names(rm)){
+        rm<-rm[trimws(as.character(rm$Organization_ID))==org,,drop=FALSE]
+      }
+      roster_memberships_directory(rm)
+      
+      # Season selectors
+      if(nrow(s)>0){
+        vals<-as.character(s$Season_ID)
+        labs<-if("Season_Name"%in%names(s))as.character(s$Season_Name)else vals
+        names(vals)<-labs
+        updateSelectInput(session,"sessions_new_season",choices=vals,selected=vals[1])
+        if("new_session_season"%in%names(input)){
+          updateSelectInput(session,"new_session_season",choices=vals,selected=vals[1])
+        }
+      }
+      
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Season architecture load error: ",e$message))
+      FALSE
+    })
+  }
+  
+  periods_for_season <- function(season_id){
+    p<-periods_directory()
+    if(is.null(p)||nrow(p)==0||!"Season_ID"%in%names(p))return(data.frame())
+    p[as.character(p$Season_ID)==as.character(season_id),,drop=FALSE]
+  }
+  
+  update_period_selector <- function(season_id,input_id){
+    p<-periods_for_season(season_id)
+    if(nrow(p)==0){
+      updateSelectInput(session,input_id,choices=c("No periods"=""),selected="")
+      return(invisible(FALSE))
+    }
+    vals<-as.character(p$Period_ID)
+    labs<-if("Period_Name"%in%names(p))as.character(p$Period_Name)else vals
+    names(vals)<-labs
+    updateSelectInput(session,input_id,choices=vals,selected=vals[1])
+    invisible(TRUE)
+  }
+  
+  observeEvent(input$sessions_new_season,{
+    req(!is.null(input$sessions_new_season),nzchar(input$sessions_new_season))
+    update_period_selector(input$sessions_new_season,"sessions_new_period")
+  },ignoreInit=TRUE)
+  
+  observeEvent(input$new_session_season,{
+    req(!is.null(input$new_session_season),nzchar(input$new_session_season))
+    update_period_selector(input$new_session_season,"new_session_period")
+  },ignoreInit=TRUE)
+  
+  current_season_id_for_date <- function(session_date){
+    s<-seasons_directory()
+    if(is.null(s)||nrow(s)==0)return("")
+    d<-as.Date(session_date)
+    starts<-as.Date(as.character(s$Start_Date))
+    ends<-as.Date(as.character(s$End_Date))
+    hit<-which(!is.na(starts)&!is.na(ends)&d>=starts&d<=ends)
+    if(length(hit)==0)return("")
+    as.character(s$Season_ID[hit[1]])
+  }
+  
+  current_period_id_for_date <- function(session_date,season_id=""){
+    p<-periods_directory()
+    if(is.null(p)||nrow(p)==0)return("")
+    d<-as.Date(session_date)
+    if(nzchar(season_id)&&"Season_ID"%in%names(p)){
+      p<-p[as.character(p$Season_ID)==season_id,,drop=FALSE]
+    }
+    starts<-as.Date(as.character(p$Start_Date))
+    ends<-as.Date(as.character(p$End_Date))
+    hit<-which(!is.na(starts)&!is.na(ends)&d>=starts&d<=ends)
+    if(length(hit)==0)return("")
+    as.character(p$Period_ID[hit[1]])
+  }
+  
+  backfill_session_season_period <- function(){
+    tryCatch({
+      d<-as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      )
+      if(nrow(d)==0||!"Session_ID"%in%names(d))return(TRUE)
+      
+      if(!"Season_ID"%in%names(d))d$Season_ID<-""
+      if(!"Period_ID"%in%names(d))d$Period_ID<-""
+      
+      changed<-FALSE
+      
+      for(i in seq_len(nrow(d))){
+        sid<-trimws(as.character(d$Session_ID[i]))
+        if(!nzchar(sid))next
+        
+        org<-if("Organization_ID"%in%names(d))trimws(as.character(d$Organization_ID[i]))else""
+        if(nzchar(org)&&org!=current_org_id())next
+        
+        dt<-suppressWarnings(as.Date(as.character(d$Session_Date[i])))
+        if(is.na(dt))next
+        
+        season_id<-trimws(as.character(d$Season_ID[i]))
+        period_id<-trimws(as.character(d$Period_ID[i]))
+        
+        if(!nzchar(season_id)){
+          season_id<-current_season_id_for_date(dt)
+          if(nzchar(season_id)){
+            d$Season_ID[i]<-season_id
+            changed<-TRUE
+          }
+        }
+        
+        if(!nzchar(period_id)){
+          period_id<-current_period_id_for_date(dt,season_id)
+          if(nzchar(period_id)){
+            d$Period_ID[i]<-period_id
+            changed<-TRUE
+          }
+        }
+      }
+      
+      if(changed){
+        # Rewrite only the compact Sessions table, preserving its existing rows/order.
+        googlesheets4::range_clear(ss=SHEET_URL,range="'Sessions'!A2:N1001")
+        real<-d[!is.na(d$Session_ID)&trimws(as.character(d$Session_ID))!="",,drop=FALSE]
+        if(nrow(real)>0){
+          # Keep exactly A:N
+          wanted<-c(
+            "Session_ID","Organization_ID","Session_Date","Session_Name","Opponent","Location",
+            "Session_Type","Start_Time","End_Time","Created_By","Notes","Status","Season_ID","Period_ID"
+          )
+          for(nm in setdiff(wanted,names(real)))real[[nm]]<-""
+          googlesheets4::range_write(
+            ss=SHEET_URL,
+            data=real[,wanted,drop=FALSE],
+            sheet="Sessions",
+            range="A2",
+            col_names=FALSE
+          )
+        }
+      }
+      
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Session season/period backfill error: ",e$message))
+      FALSE
+    })
+  }
+  
+  output$season_period_status<-renderUI({
+    s<-seasons_directory()
+    p<-periods_directory()
+    sub<-subscriptions_directory()
+    
+    if(is.null(s)||nrow(s)==0){
+      return(div(class="warning-text","No baseball year is configured for this organization."))
+    }
+    
+    season_name<-if("Season_Name"%in%names(s))as.character(s$Season_Name[1])else as.character(s$Season_ID[1])
+    fall_name<-""
+    spring_name<-""
+    if(!is.null(p)&&nrow(p)>0&&"Period_Type"%in%names(p)){
+      f<-p[toupper(trimws(as.character(p$Period_Type)))=="FALL",,drop=FALSE]
+      sp<-p[toupper(trimws(as.character(p$Period_Type)))=="SPRING",,drop=FALSE]
+      if(nrow(f)>0)fall_name<-as.character(f$Period_Name[1])
+      if(nrow(sp)>0)spring_name<-as.character(sp$Period_Name[1])
+    }
+    access<-if(!is.null(sub)&&nrow(sub)>0&&"Access_Status"%in%names(sub))as.character(sub$Access_Status[1])else"Not configured"
+    
+    div(class="multi-user-ready",HTML(paste0(
+      "<strong>Baseball year:</strong> ",season_name,"<br>",
+      "<strong>Fall period:</strong> ",ifelse(nzchar(fall_name),fall_name,"—")," (development / non-official stats)<br>",
+      "<strong>Spring period:</strong> ",ifelse(nzchar(spring_name),spring_name,"—")," (official stats)<br>",
+      "<strong>Access status:</strong> ",access
+    )))
+  })
+  
   ensure_users_sheet <- function(){
     tryCatch({
       sheets <- googlesheets4::sheet_names(SHEET_URL)
@@ -3580,6 +3950,7 @@ server <- function(input, output, session) {
   
   observeEvent(active_user_id(),{
     req(nzchar(active_user_id()))
+    load_season_architecture()
     refresh_sessions_admin_data()
     load_sessions()
     load_report_pitches()
@@ -4077,21 +4448,24 @@ server <- function(input, output, session) {
   # LOAD SESSIONS
   # ==================================================
   
-  append_session_record <- function(session_date,session_name,session_type,opponent="",location="",created_by="",notes=""){
+  append_session_record <- function(session_date,session_name,session_type,opponent="",location="",created_by="",notes="",season_id="",period_id=""){
     session_name<-trimws(as.character(session_name))
     if(session_name=="")session_name<-paste0(as.character(session_type)," — ",format(as.Date(session_date),"%m/%d/%Y"))
+    if(!nzchar(season_id))season_id<-current_season_id_for_date(session_date)
+    if(!nzchar(period_id))period_id<-current_period_id_for_date(session_date,season_id)
     sid<-unique_record_id("SESSION")
     append_row_atomic("Sessions",list(
       sid,current_org_id(),format(as.Date(session_date),"%Y-%m-%d"),session_name,
       as.character(opponent),as.character(location),as.character(session_type),
-      format(Sys.time(),"%H:%M:%S"),"",as.character(created_by),as.character(notes),"Active"
+      format(Sys.time(),"%H:%M:%S"),"",as.character(created_by),as.character(notes),"Active",
+      as.character(season_id),as.character(period_id)
     ))
     sid
   }
   
   refresh_sessions_admin_data <- function(){
     tryCatch({
-      s<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:L1001",col_names=TRUE),stringsAsFactors=FALSE), "sessions")
+      s<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),stringsAsFactors=FALSE), "sessions")
       if(nrow(s)>0&&"Session_ID"%in%names(s))s<-s[!is.na(s$Session_ID)&trimws(as.character(s$Session_ID))!="",,drop=FALSE]
       if(nrow(s)>0&&"Organization_ID"%in%names(s))s<-s[trimws(as.character(s$Organization_ID))==current_org_id(),,drop=FALSE]
       sessions_admin_sessions(s)
@@ -4145,7 +4519,7 @@ server <- function(input, output, session) {
   
   update_session_status <- function(session_id,new_status){
     if(is.null(session_id)||session_id=="")stop("Select a session first.")
-    d<-as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:L1001",col_names=TRUE),stringsAsFactors=FALSE)
+    d<-as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),stringsAsFactors=FALSE)
     idx<-which(as.character(d$Session_ID)==as.character(session_id))
     if(length(idx)==0)stop("Session ID was not found.")
     i<-idx[1]; row<-i+1
@@ -13347,9 +13721,15 @@ server <- function(input, output, session) {
     compact_plate_appearances_sheet_if_needed()
     load_app_settings(update_ui=TRUE)
     
-    # V52: establish User -> Organization -> Role before loading data.
+    # User -> Organization -> Role
     ensure_users_sheet()
     load_user_directory()
+    
+    # V54: Organization -> Subscription -> Baseball Year -> Period -> Roster
+    ensure_season_architecture_sheets()
+    seed_lagrange_2026_27_architecture()
+    load_season_architecture()
+    backfill_session_season_period()
     
     # Backend snapshot is scoped to the active user's organization.
     refresh_sessions_admin_data()
