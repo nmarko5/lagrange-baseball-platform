@@ -7,10 +7,20 @@ library(googlesheets4)
 
 SHEET_URL <- "https://docs.google.com/spreadsheets/d/1FBwANX0oBZO6bYX5iblICFsf-HWeDC7Hj_RmTvANBZw/edit?usp=sharing"
 
-gs4_service_account_path <- Sys.getenv("GS4_SERVICE_ACCOUNT_JSON", unset = "")
-if (nzchar(gs4_service_account_path) && file.exists(gs4_service_account_path)) {
-  gs4_auth(path = gs4_service_account_path)
+gs4_service_account_json <- Sys.getenv("GS4_SERVICE_ACCOUNT_JSON", unset = "")
+
+if (nzchar(gs4_service_account_json)) {
+  # Posit Connect Cloud stores secrets as environment-variable values.
+  # Write the service-account JSON to a temporary file at runtime,
+  # authenticate with it, then remove the temporary file.
+  gs4_service_account_file <- tempfile(fileext = ".json")
+  writeLines(gs4_service_account_json, gs4_service_account_file, useBytes = TRUE)
+  
+  gs4_auth(path = gs4_service_account_file)
+  
+  unlink(gs4_service_account_file)
 } else {
+  # Local development fallback
   gs4_auth(email = "natemarko5@gmail.com")
 }
 
