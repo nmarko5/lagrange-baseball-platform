@@ -3174,6 +3174,13 @@ ui <- fluidPage(
 )
 
 # ==================================================
+# V57 — PERFORMANCE + INITIALIZATION STABILITY
+# Built directly on V56.
+# Normal startup performs reads only; roster seeding is explicit.
+# Roster UI initializes only after cached season architecture is ready.
+# ==================================================
+
+# ==================================================
 # V56 — SUBSCRIPTION STATUS + SEASON ROSTER MANAGEMENT
 # Built directly on V55.
 # Adds persistent season roster memberships while preserving player history.
@@ -3678,33 +3685,24 @@ server <- function(input, output, session) {
     })
   }
   
-  seed_current_roster_memberships <- function(){
+  seed_current_roster_memberships <- function(season_id=NULL){
     tryCatch({
       org<-current_org_id()
-      season_id<-"LAGRANGE_2026_27"
       
-      players<-as.data.frame(
-        googlesheets4::range_read(
-          ss=SHEET_URL,
-          sheet="Players",
-          range="A1:L1001",
-          col_names=TRUE
-        ),
-        stringsAsFactors=FALSE
-      )
-      players<-v49_normalize_sheet_data(players,"generic")
-      
-      if(nrow(players)==0||!"Player_ID"%in%names(players))return(TRUE)
-      
-      if("Organization_ID"%in%names(players)){
-        players<-players[trimws(as.character(players$Organization_ID))==org,,drop=FALSE]
+      if(is.null(season_id)||!nzchar(as.character(season_id))){
+        season_id<-isolate(input$roster_manage_season)
       }
-      
-      if("Active"%in%names(players)){
-        a<-toupper(trimws(as.character(players$Active)))
-        players<-players[is.na(a)|a==""|a%in%c("TRUE","T","1","YES","Y","ACTIVE"),,drop=FALSE]
+      if(is.null(season_id)||!nzchar(as.character(season_id))){
+        s<-seasons_directory()
+        if(is.null(s)||nrow(s)==0)return(FALSE)
+        season_id<-as.character(s$Season_ID[1])
       }
+      season_id<-as.character(season_id)
       
+      players<-player_lookup()
+      if(is.null(players)||nrow(players)==0||!"Player_ID"%in%names(players))return(FALSE)
+      
+      players<-as.data.frame(players,stringsAsFactors=FALSE)
       players<-players[
         !is.na(players$Player_ID)&trimws(as.character(players$Player_ID))!="",
         ,
@@ -3713,19 +3711,10 @@ server <- function(input, output, session) {
       
       if(nrow(players)==0)return(TRUE)
       
-      rm<-as.data.frame(
-        googlesheets4::range_read(
-          ss=SHEET_URL,
-          sheet="Roster_Memberships",
-          range="A1:H5001",
-          col_names=TRUE,
-          col_types="c"
-        ),
-        stringsAsFactors=FALSE
-      )
-      
+      rm<-roster_memberships_directory()
       existing<-character(0)
-      if(nrow(rm)>0&&all(c("Organization_ID","Season_ID","Player_ID")%in%names(rm))){
+      
+      if(!is.null(rm)&&nrow(rm)>0&&all(c("Organization_ID","Season_ID","Player_ID")%in%names(rm))){
         hit<-trimws(as.character(rm$Organization_ID))==org&
           trimws(as.character(rm$Season_ID))==season_id&
           !is.na(rm$Player_ID)&trimws(as.character(rm$Player_ID))!=""
@@ -3812,7 +3801,7 @@ server <- function(input, output, session) {
       }
       roster_memberships_directory(rm)
       
-      # Season selectors
+      # Session creation selectors.
       if(nrow(s)>0){
         vals<-as.character(s$Season_ID)
         labs<-if("Season_Name"%in%names(s))as.character(s$Season_Name)else vals
@@ -3821,18 +3810,11 @@ server <- function(input, output, session) {
         if("new_session_season"%in%names(input)){
           updateSelectInput(session,"new_session_season",choices=vals,selected=vals[1])
         }
-        
-        current_roster_season<-isolate(input$roster_manage_season)
-        if(is.null(current_roster_season)||!nzchar(current_roster_season)||!current_roster_season%in%unname(vals)){
-          current_roster_season<-vals[1]
-        }
-        updateSelectInput(
-          session,
-          "roster_manage_season",
-          choices=vals,
-          selected=current_roster_season
-        )
       }
+      
+      # V57: roster selectors initialize only after all four architecture tables
+      # are loaded into cache.
+      initialize_roster_management_from_cache()
       
       TRUE
     },error=function(e){
@@ -4014,7 +3996,17 @@ server <- function(input, output, session) {
     if(!is.null(ss)&&nrow(ss)>0&&"Access_Status"%in%names(ss)){
       candidate<-trimws(as.character(ss$Access_Status))
       candidate<-candidate[!is.na(candidate)&candidate!=""]
-      if(length(candidate)>0)access<-candidate[1]
+      if(length(candidate)>0){
+        access<-candidate[1]
+      }
+    }
+    
+    # V57 fallback: if this worker did not see an exact-season subscription row,
+    # use any cached organization subscription with a configured status.
+    if(access=="Not configured"&&!is.null(sub)&&nrow(sub)>0&&"Access_Status"%in%names(sub)){
+      fallback<-trimws(as.character(sub$Access_Status))
+      fallback<-fallback[!is.na(fallback)&fallback!=""]
+      if(length(fallback)>0)access<-fallback[1]
     }
     
     div(class="multi-user-ready",HTML(paste0(
@@ -4496,31 +4488,59 @@ server <- function(input, output, session) {
     HTML(paste0("<strong>Backend:</strong> Google Sheets<br><strong>Authentication:</strong> ",auth_mode,
                 "<br><strong>Sheet:</strong> LaGrange Swing Decision Platform — Backend"))
   })
-  current_roster_memberships <- reactive({
-    rm<-roster_memberships_directory()
-    sid<-input$roster_manage_season
+  initialize_roster_management_from_cache <- function(){
+    s<-seasons_directory()
     
-    if(is.null(rm)||nrow(rm)==0||is.null(sid)||!nzchar(sid)){
-      return(data.frame())
+    if(is.null(s)||nrow(s)==0){
+      updateSelectInput(
+        session,
+        "roster_manage_season",
+        choices=c("No baseball years"=""),
+        selected=""
+      )
+      updateSelectizeInput(
+        session,
+        "roster_manage_players",
+        choices=character(0),
+        selected=character(0),
+        server=TRUE
+      )
+      return(invisible(FALSE))
     }
     
-    if(!all(c("Season_ID","Player_ID")%in%names(rm)))return(data.frame())
+    vals<-as.character(s$Season_ID)
+    labs<-if("Season_Name"%in%names(s))as.character(s$Season_Name)else vals
+    names(vals)<-labs
     
-    rm[
-      trimws(as.character(rm$Season_ID))==trimws(as.character(sid)),
-      ,
-      drop=FALSE
-    ]
-  })
-  
-  refresh_roster_management_ui <- function(){
-    sid<-isolate(input$roster_manage_season)
+    cur<-isolate(input$roster_manage_season)
+    if(is.null(cur)||!nzchar(cur)||!cur%in%unname(vals)){
+      # Prefer active season.
+      active_idx<-integer(0)
+      if("Active"%in%names(s)){
+        a<-toupper(trimws(as.character(s$Active)))
+        active_idx<-which(a%in%c("TRUE","T","1","YES","Y","ACTIVE"))
+      }
+      cur<-if(length(active_idx)>0)as.character(s$Season_ID[active_idx[1]])else vals[1]
+    }
+    
+    updateSelectInput(
+      session,
+      "roster_manage_season",
+      choices=vals,
+      selected=cur
+    )
+    
+    # Roster player choices come from the already-loaded player cache.
     players<-player_lookup()
-    rm<-roster_memberships_directory()
-    
     if(is.null(players)||nrow(players)==0||!"Player_ID"%in%names(players)){
-      updateSelectizeInput(session,"roster_manage_players",choices=character(0),selected=character(0),server=TRUE)
-      return(invisible(FALSE))
+      updateSelectizeInput(
+        session,
+        "roster_manage_players",
+        choices=character(0),
+        selected=character(0),
+        server=TRUE
+      )
+      return(invisible(TRUE))
     }
     
     players<-players[
@@ -4543,11 +4563,12 @@ server <- function(input, output, session) {
     choices<-as.character(players$Player_ID)
     names(choices)<-labels
     
+    rm<-roster_memberships_directory()
     selected<-character(0)
-    if(!is.null(sid)&&nzchar(sid)&&!is.null(rm)&&nrow(rm)>0&&
-       all(c("Season_ID","Player_ID","Status")%in%names(rm))){
+    
+    if(!is.null(rm)&&nrow(rm)>0&&all(c("Season_ID","Player_ID","Status")%in%names(rm))){
       status<-toupper(trimws(as.character(rm$Status)))
-      hit<-trimws(as.character(rm$Season_ID))==trimws(sid)&status=="ACTIVE"
+      hit<-trimws(as.character(rm$Season_ID))==trimws(cur)&status=="ACTIVE"
       selected<-as.character(rm$Player_ID[hit])
       selected<-selected[selected%in%unname(choices)]
     }
@@ -4561,6 +4582,27 @@ server <- function(input, output, session) {
     )
     
     invisible(TRUE)
+  }
+  
+  current_roster_memberships <- reactive({
+    rm<-roster_memberships_directory()
+    sid<-input$roster_manage_season
+    
+    if(is.null(rm)||nrow(rm)==0||is.null(sid)||!nzchar(sid)){
+      return(data.frame())
+    }
+    
+    if(!all(c("Season_ID","Player_ID")%in%names(rm)))return(data.frame())
+    
+    rm[
+      trimws(as.character(rm$Season_ID))==trimws(as.character(sid)),
+      ,
+      drop=FALSE
+    ]
+  })
+  
+  refresh_roster_management_ui <- function(){
+    initialize_roster_management_from_cache()
   }
   
   observeEvent(input$roster_manage_season,{
@@ -4638,10 +4680,9 @@ server <- function(input, output, session) {
   
   observeEvent(input$roster_sync_current,{
     tryCatch({
-      seed_current_roster_memberships()
+      seed_current_roster_memberships(input$roster_manage_season)
       compact_architecture_sheet("Roster_Memberships","H","Roster_Membership_ID",5001)
       load_season_architecture()
-      refresh_roster_management_ui()
       roster_manage_message("Current organization players synced into the selected season roster.")
     },error=function(e){
       roster_manage_message(paste0("Roster sync error: ",e$message))
@@ -14223,10 +14264,9 @@ server <- function(input, output, session) {
   # STARTUP INITIALIZATION
   # ==================================================
   observeEvent(TRUE,{
-    # Lightweight per-browser reads.
     load_app_settings(update_ui=TRUE)
     
-    # V55: expensive maintenance only once per Connect Cloud R worker.
+    # V57: one-time worker maintenance only.
     if(!isTRUE(v55_process_state$maintenance_done)){
       ensure_multi_user_pitch_columns()
       compact_pitches_sheet_if_needed()
@@ -14235,30 +14275,22 @@ server <- function(input, output, session) {
       ensure_season_architecture_sheets()
       seed_lagrange_2026_27_architecture()
       
-      # V56: compact new architecture sheets because Google Sheets can append
-      # after preallocated blank rows on a brand-new tab.
       compact_architecture_sheet("Seasons","F","Season_ID",5001)
       compact_architecture_sheet("Periods","I","Period_ID",5001)
       compact_architecture_sheet("Subscriptions","G","Subscription_ID",5001)
       compact_architecture_sheet("Roster_Memberships","H","Roster_Membership_ID",5001)
       
-      # Load identity/season architecture, seed the current roster membership,
-      # then compact once more before normal lightweight reads.
       load_user_directory()
-      load_season_architecture()
-      seed_current_roster_memberships()
-      compact_architecture_sheet("Roster_Memberships","H","Roster_Membership_ID",5001)
       load_season_architecture()
       backfill_session_season_period()
       
       v55_process_state$maintenance_done <- TRUE
     }else{
-      # Normal browser sessions only read the already-configured identity layer.
+      # Normal browser startup: reads only, no architecture writes.
       load_user_directory()
       load_season_architecture()
     }
     
-    # Backend snapshot is scoped to the active user's organization.
     refresh_sessions_admin_data()
     load_sessions()
     load_report_pitches()
