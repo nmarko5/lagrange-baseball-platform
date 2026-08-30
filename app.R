@@ -3349,6 +3349,79 @@ server <- function(input, output, session) {
       invisible(FALSE)
     })
   }
+  
+  compact_plate_appearances_sheet_if_needed <- function(){
+    tryCatch({
+      raw<-suppressMessages(
+        googlesheets4::range_read(
+          ss=SHEET_URL,
+          sheet="Plate_Appearances",
+          range="A2:Z10000",
+          col_names=FALSE,
+          col_types="c"
+        )
+      )
+      raw<-as.data.frame(raw,stringsAsFactors=FALSE)
+      
+      if(nrow(raw)==0 || ncol(raw)<6) return(invisible(FALSE))
+      
+      nonblank <- function(x){
+        x<-as.character(x)
+        !is.na(x) & trimws(x)!=""
+      }
+      
+      # A = PA_ID, C = Session_ID, E = Batter_ID, F = Pitcher_ID.
+      keep <- nonblank(raw[[1]]) | nonblank(raw[[3]]) |
+        nonblank(raw[[5]]) | nonblank(raw[[6]])
+      
+      real_rows <- which(keep)
+      if(length(real_rows)==0) return(invisible(FALSE))
+      
+      last_real_position <- max(real_rows)
+      real_count <- length(real_rows)
+      gap_count <- last_real_position - real_count
+      
+      # Only compact when there is a meaningful hole/preallocated block.
+      if(gap_count < 25) return(invisible(FALSE))
+      
+      compact <- raw[keep,,drop=FALSE]
+      rownames(compact)<-NULL
+      
+      googlesheets4::range_clear(
+        ss=SHEET_URL,
+        range="'Plate_Appearances'!A2:Z10000"
+      )
+      
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=compact,
+        sheet="Plate_Appearances",
+        range="A2",
+        col_names=FALSE
+      )
+      
+      save_status(
+        paste0(
+          "Backend cleaned: ",
+          real_count,
+          " real plate appearances compacted with ",
+          gap_count,
+          " empty/preallocated rows removed."
+        )
+      )
+      
+      invisible(TRUE)
+    },error=function(e){
+      save_status(
+        paste0(
+          "Plate-appearance cleanup warning: ",
+          conditionMessage(e)
+        )
+      )
+      invisible(FALSE)
+    })
+  }
+  
   ensure_settings_sheet <- function(){
     tryCatch({
       # First try to read the worksheet directly. This avoids relying on
@@ -12978,6 +13051,7 @@ server <- function(input, output, session) {
   observeEvent(TRUE,{
     ensure_multi_user_pitch_columns()
     compact_pitches_sheet_if_needed()
+    compact_plate_appearances_sheet_if_needed()
     load_app_settings(update_ui=TRUE)
     refresh_sessions_admin_data()
   },once=TRUE)
