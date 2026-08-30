@@ -3154,6 +3154,13 @@ ui <- fluidPage(
 )
 
 # ==================================================
+# V55 — STARTUP PERFORMANCE / ONE-TIME MAINTENANCE
+# Built directly on V54.
+# Expensive Google Sheets maintenance runs once per worker; normal browser
+# sessions use lightweight reads. Also fixes Period / Subscription status display.
+# ==================================================
+
+# ==================================================
 # V54 — SEASONS / PERIODS / SUBSCRIPTIONS / ROSTER MEMBERSHIPS
 # Built directly on V53.
 # Fall and Spring are separate periods; Fall 2026 is non-official and Spring 2027 is official.
@@ -3283,6 +3290,14 @@ v49_normalize_sheet_data <- function(df, type = c("generic", "pitches", "pa", "s
   df
 }
 
+
+# ==================================================
+# V55 — PROCESS-LEVEL STARTUP STATE
+# Expensive backend maintenance runs once per R worker instead of once
+# for every browser/Shiny session.
+# ==================================================
+v55_process_state <- new.env(parent = emptyenv())
+v55_process_state$maintenance_done <- FALSE
 
 # ==================================================
 # SERVER
@@ -3458,26 +3473,30 @@ server <- function(input, output, session) {
       for(sheet_name in names(specs)){
         if(!sheet_name %in% existing){
           googlesheets4::sheet_add(SHEET_URL,sheet_name)
+          cols <- specs[[sheet_name]]
+          header <- as.data.frame(
+            as.list(setNames(cols,cols)),
+            stringsAsFactors=FALSE,
+            check.names=FALSE
+          )
+          googlesheets4::range_write(
+            ss=SHEET_URL,
+            data=header,
+            sheet=sheet_name,
+            range=paste0("A1:",LETTERS[length(cols)],"1"),
+            col_names=FALSE
+          )
         }
-        cols <- specs[[sheet_name]]
-        header <- as.data.frame(
-          as.list(setNames(cols,cols)),
-          stringsAsFactors=FALSE,
-          check.names=FALSE
-        )
-        googlesheets4::range_write(
-          ss=SHEET_URL,
-          data=header,
-          sheet=sheet_name,
-          range=paste0("A1:",LETTERS[length(cols)],"1"),
-          col_names=FALSE
-        )
       }
       
-      # Extend Sessions with explicit season/period keys.
+      # Sessions M:N only needs to be ensured during one-time worker maintenance.
       googlesheets4::range_write(
         ss=SHEET_URL,
-        data=data.frame(Season_ID="Season_ID",Period_ID="Period_ID",stringsAsFactors=FALSE),
+        data=data.frame(
+          Season_ID="Season_ID",
+          Period_ID="Period_ID",
+          stringsAsFactors=FALSE
+        ),
         sheet="Sessions",
         range="M1:N1",
         col_names=FALSE
@@ -3494,12 +3513,16 @@ server <- function(input, output, session) {
     tryCatch({
       org <- setting_chr("Organization_ID","LAGRANGE")
       
-      # Seasons
-      s <- as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F1001",col_names=TRUE),
+      s <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,sheet="Seasons",range="A1:F101",col_names=TRUE
+        ),
         stringsAsFactors=FALSE
-      )
-      if(!("LAGRANGE_2026_27" %in% as.character(s$Season_ID))){
+      ),"generic")
+      
+      existing_seasons <- if("Season_ID"%in%names(s)) trimws(as.character(s$Season_ID)) else character(0)
+      
+      if(!"LAGRANGE_2026_27" %in% existing_seasons){
         googlesheets4::sheet_append(
           ss=SHEET_URL,
           data=data.frame(
@@ -3515,12 +3538,14 @@ server <- function(input, output, session) {
         )
       }
       
-      # Periods
-      p <- as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I1001",col_names=TRUE),
+      p <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,sheet="Periods",range="A1:I101",col_names=TRUE
+        ),
         stringsAsFactors=FALSE
-      )
-      existing_periods <- if("Period_ID"%in%names(p)) as.character(p$Period_ID) else character(0)
+      ),"generic")
+      
+      existing_periods <- if("Period_ID"%in%names(p)) trimws(as.character(p$Period_ID)) else character(0)
       
       period_seed <- data.frame(
         Period_ID=c("LAGRANGE_FALL_2026","LAGRANGE_SPRING_2027"),
@@ -3545,12 +3570,15 @@ server <- function(input, output, session) {
         }
       }
       
-      # Development subscription record. This does not charge or enforce billing yet.
-      sub <- as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G1001",col_names=TRUE),
+      sub <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,sheet="Subscriptions",range="A1:G101",col_names=TRUE
+        ),
         stringsAsFactors=FALSE
-      )
-      existing_subs <- if("Subscription_ID"%in%names(sub)) as.character(sub$Subscription_ID) else character(0)
+      ),"generic")
+      
+      existing_subs <- if("Subscription_ID"%in%names(sub)) trimws(as.character(sub$Subscription_ID)) else character(0)
+      
       if(!"LAGRANGE_SUB_2026_27" %in% existing_subs){
         googlesheets4::sheet_append(
           ss=SHEET_URL,
@@ -3580,7 +3608,7 @@ server <- function(input, output, session) {
       org <- current_org_id()
       
       s <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F1001",col_names=TRUE),
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F101",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(s)>0 && "Organization_ID"%in%names(s)){
@@ -3589,7 +3617,7 @@ server <- function(input, output, session) {
       seasons_directory(s)
       
       p <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I1001",col_names=TRUE),
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I101",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(p)>0 && "Organization_ID"%in%names(p)){
@@ -3598,7 +3626,7 @@ server <- function(input, output, session) {
       periods_directory(p)
       
       sub <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G1001",col_names=TRUE),
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G101",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(sub)>0 && "Organization_ID"%in%names(sub)){
@@ -3607,7 +3635,7 @@ server <- function(input, output, session) {
       subscriptions_directory(sub)
       
       rm <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H5001",col_names=TRUE),
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H1001",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(rm)>0 && "Organization_ID"%in%names(rm)){
@@ -3767,16 +3795,43 @@ server <- function(input, output, session) {
       return(div(class="warning-text","No baseball year is configured for this organization."))
     }
     
-    season_name<-if("Season_Name"%in%names(s))as.character(s$Season_Name[1])else as.character(s$Season_ID[1])
+    # Prefer active season; otherwise use first configured season.
+    srow<-s[1,,drop=FALSE]
+    if("Active"%in%names(s)){
+      active_chr<-toupper(trimws(as.character(s$Active)))
+      hit<-which(active_chr%in%c("TRUE","T","1","YES","Y","ACTIVE"))
+      if(length(hit)>0)srow<-s[hit[1],,drop=FALSE]
+    }
+    
+    season_id<-as.character(srow$Season_ID[1])
+    season_name<-if("Season_Name"%in%names(srow))as.character(srow$Season_Name[1])else season_id
+    
+    pp<-p
+    if(!is.null(pp)&&nrow(pp)>0&&"Season_ID"%in%names(pp)){
+      pp<-pp[as.character(pp$Season_ID)==season_id,,drop=FALSE]
+    }
+    
     fall_name<-""
     spring_name<-""
-    if(!is.null(p)&&nrow(p)>0&&"Period_Type"%in%names(p)){
-      f<-p[toupper(trimws(as.character(p$Period_Type)))=="FALL",,drop=FALSE]
-      sp<-p[toupper(trimws(as.character(p$Period_Type)))=="SPRING",,drop=FALSE]
-      if(nrow(f)>0)fall_name<-as.character(f$Period_Name[1])
-      if(nrow(sp)>0)spring_name<-as.character(sp$Period_Name[1])
+    
+    if(!is.null(pp)&&nrow(pp)>0&&"Period_Type"%in%names(pp)){
+      period_type<-toupper(trimws(as.character(pp$Period_Type)))
+      f<-pp[period_type=="FALL",,drop=FALSE]
+      sp<-pp[period_type=="SPRING",,drop=FALSE]
+      if(nrow(f)>0&&"Period_Name"%in%names(f))fall_name<-as.character(f$Period_Name[1])
+      if(nrow(sp)>0&&"Period_Name"%in%names(sp))spring_name<-as.character(sp$Period_Name[1])
     }
-    access<-if(!is.null(sub)&&nrow(sub)>0&&"Access_Status"%in%names(sub))as.character(sub$Access_Status[1])else"Not configured"
+    
+    ss<-sub
+    if(!is.null(ss)&&nrow(ss)>0&&"Season_ID"%in%names(ss)){
+      ss<-ss[as.character(ss$Season_ID)==season_id,,drop=FALSE]
+    }
+    
+    access<-"Not configured"
+    if(!is.null(ss)&&nrow(ss)>0&&"Access_Status"%in%names(ss)){
+      access<-as.character(ss$Access_Status[1])
+      if(is.na(access)||!nzchar(trimws(access)))access<-"Not configured"
+    }
     
     div(class="multi-user-ready",HTML(paste0(
       "<strong>Baseball year:</strong> ",season_name,"<br>",
@@ -13716,20 +13771,29 @@ server <- function(input, output, session) {
   # STARTUP INITIALIZATION
   # ==================================================
   observeEvent(TRUE,{
-    ensure_multi_user_pitch_columns()
-    compact_pitches_sheet_if_needed()
-    compact_plate_appearances_sheet_if_needed()
+    # Lightweight per-browser reads.
     load_app_settings(update_ui=TRUE)
     
-    # User -> Organization -> Role
-    ensure_users_sheet()
-    load_user_directory()
-    
-    # V54: Organization -> Subscription -> Baseball Year -> Period -> Roster
-    ensure_season_architecture_sheets()
-    seed_lagrange_2026_27_architecture()
-    load_season_architecture()
-    backfill_session_season_period()
+    # V55: expensive maintenance only once per Connect Cloud R worker.
+    if(!isTRUE(v55_process_state$maintenance_done)){
+      ensure_multi_user_pitch_columns()
+      compact_pitches_sheet_if_needed()
+      compact_plate_appearances_sheet_if_needed()
+      ensure_users_sheet()
+      ensure_season_architecture_sheets()
+      seed_lagrange_2026_27_architecture()
+      
+      # Load architecture before the one-time historical session backfill.
+      load_user_directory()
+      load_season_architecture()
+      backfill_session_season_period()
+      
+      v55_process_state$maintenance_done <- TRUE
+    }else{
+      # Normal browser sessions only read the already-configured identity layer.
+      load_user_directory()
+      load_season_architecture()
+    }
     
     # Backend snapshot is scoped to the active user's organization.
     refresh_sessions_admin_data()
