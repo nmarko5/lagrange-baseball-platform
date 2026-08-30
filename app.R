@@ -3104,6 +3104,14 @@ ui <- fluidPage(
                   div(class="admin-note","Organization ID is stored with new records. Existing historical records are not rewritten.")
               ),
               div(class="admin-card",
+                  div(class="admin-title","Identity & Access Foundation"),
+                  uiOutput("identity_status"),
+                  selectInput("setting_active_user","Active Development User",choices=c("Loading..."="")),
+                  div(class="admin-note",
+                      "Development mode only: this establishes User → Organization → Role → Data architecture. ",
+                      "It is not authentication while the Connect Cloud app remains public.")
+              ),
+              div(class="admin-card",
                   div(class="admin-title","Multi-User / Server Readiness"),
                   uiOutput("settings_multi_user_status"),
                   div(class="connection-card",uiOutput("settings_connection_status")),
@@ -3137,6 +3145,11 @@ ui <- fluidPage(
     
   )
 )
+
+# ==================================================
+# V52 — USER / ORGANIZATION / ROLE / DATA FOUNDATION
+# Built directly on V51. Development identity only; not authentication.
+# ==================================================
 
 # ==================================================
 # V49 — REPORT DATA TYPE NORMALIZATION
@@ -3307,6 +3320,8 @@ server <- function(input, output, session) {
     Bullpen_Weight_Strike=.10
   ))
   settings_message <- reactiveVal(NULL)
+  user_directory <- reactiveVal(data.frame())
+  active_user_id <- reactiveVal("")
   sessions_admin_sessions <- reactiveVal(data.frame())
   sessions_admin_pitches <- reactiveVal(data.frame())
   sessions_admin_pas <- reactiveVal(data.frame())
@@ -3338,13 +3353,45 @@ server <- function(input, output, session) {
     if(!is.finite(x))default else x
   }
   current_org_id <- function(){
+    uid <- active_user_id()
+    users <- user_directory()
+    if(!is.null(uid) && nzchar(uid) && !is.null(users) && nrow(users)>0 &&
+       all(c("User_ID","Organization_ID") %in% names(users))){
+      hit <- users[as.character(users$User_ID)==uid,,drop=FALSE]
+      if(nrow(hit)>0){
+        org <- trimws(as.character(hit$Organization_ID[1]))
+        if(nzchar(org)) return(org)
+      }
+    }
     x<-trimws(setting_chr("Organization_ID","LAGRANGE"))
     if(x=="")"LAGRANGE"else x
   }
+  current_user_row <- function(){
+    uid <- active_user_id()
+    users <- user_directory()
+    if(is.null(uid) || !nzchar(uid) || is.null(users) || nrow(users)==0 ||
+       !"User_ID" %in% names(users)) return(data.frame())
+    users[as.character(users$User_ID)==uid,,drop=FALSE]
+  }
+  current_user_role <- function(){
+    u <- current_user_row()
+    if(nrow(u)==0 || !"Role" %in% names(u)) return("Coach")
+    r <- trimws(as.character(u$Role[1]))
+    if(!nzchar(r)) "Coach" else r
+  }
   current_charting_user <- function(){
+    u <- current_user_row()
+    if(nrow(u)>0 && "Display_Name" %in% names(u)){
+      nm <- trimws(as.character(u$Display_Name[1]))
+      if(nzchar(nm)) return(nm)
+    }
     x<-if(!is.null(input$charting_user))trimws(as.character(input$charting_user))else""
     if(x=="")x<-trimws(setting_chr("Default_Charting_User","Nate Marko"))
     x
+  }
+  current_user_id <- function(){
+    uid <- active_user_id()
+    if(is.null(uid) || !nzchar(uid)) "" else uid
   }
   unique_record_id <- function(prefix,session_id=""){
     stamp<-gsub("[^0-9]","",format(Sys.time(),"%Y%m%d%H%M%OS6"))
@@ -3364,12 +3411,103 @@ server <- function(input, output, session) {
     googlesheets4::sheet_append(ss=SHEET_URL,data=one_row_df(values),sheet=sheet_name)
     invisible(TRUE)
   }
+  ensure_users_sheet <- function(){
+    tryCatch({
+      sheets <- googlesheets4::sheet_names(SHEET_URL)
+      if(!"Users" %in% sheets) googlesheets4::sheet_add(SHEET_URL,"Users")
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=data.frame(
+          User_ID="User_ID",Organization_ID="Organization_ID",
+          Display_Name="Display_Name",Email="Email",Role="Role",Active="Active",
+          stringsAsFactors=FALSE
+        ),
+        sheet="Users",range="A1:F1",col_names=FALSE
+      )
+      d<-as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Users",range="A1:F1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      )
+      has_users<-nrow(d)>0&&"User_ID"%in%names(d)&&any(!is.na(d$User_ID)&trimws(as.character(d$User_ID))!="")
+      if(!has_users){
+        googlesheets4::sheet_append(
+          ss=SHEET_URL,
+          data=data.frame(
+            User_ID="LAGRANGE_USER_NATE_MARKO",
+            Organization_ID=setting_chr("Organization_ID","LAGRANGE"),
+            Display_Name=setting_chr("Default_Charting_User","Nate Marko"),
+            Email="",Role="Admin",Active="TRUE",stringsAsFactors=FALSE
+          ),
+          sheet="Users"
+        )
+      }
+      TRUE
+    },error=function(e){settings_message(paste0("Users setup error: ",e$message));FALSE})
+  }
+  
+  load_user_directory <- function(){
+    tryCatch({
+      d<-as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Users",range="A1:F1001",col_names=TRUE),
+        stringsAsFactors=FALSE
+      )
+      d<-v49_normalize_sheet_data(d,"generic")
+      if(nrow(d)>0&&"User_ID"%in%names(d))d<-d[!is.na(d$User_ID)&trimws(as.character(d$User_ID))!="",,drop=FALSE]
+      if(nrow(d)>0&&"Active"%in%names(d)){
+        a<-toupper(trimws(as.character(d$Active)))
+        d<-d[is.na(a)|a==""|a%in%c("TRUE","T","1","YES","Y"),,drop=FALSE]
+      }
+      user_directory(d)
+      if(nrow(d)>0){
+        labs<-paste0(as.character(d$Display_Name)," — ",if("Role"%in%names(d))as.character(d$Role)else"Coach")
+        vals<-as.character(d$User_ID);names(vals)<-labs
+        cur<-active_user_id()
+        if(is.null(cur)||!nzchar(cur)||!cur%in%vals){
+          default_name<-trimws(setting_chr("Default_Charting_User","Nate Marko"))
+          hit<-which(trimws(as.character(d$Display_Name))==default_name)
+          cur<-if(length(hit)>0)as.character(d$User_ID[hit[1]])else vals[1]
+          active_user_id(cur)
+        }
+        updateSelectInput(session,"setting_active_user",choices=vals,selected=active_user_id())
+      }else{
+        updateSelectInput(session,"setting_active_user",choices=c("No active users"=""),selected="")
+      }
+      TRUE
+    },error=function(e){settings_message(paste0("Users load error: ",e$message));FALSE})
+  }
+  
+  output$identity_status<-renderUI({
+    u<-current_user_row()
+    if(nrow(u)==0)return(div(class="warning-text","No active development user is selected."))
+    div(class="multi-user-ready",HTML(paste0(
+      "<strong>Active user:</strong> ",as.character(u$Display_Name[1]),"<br>",
+      "<strong>Organization:</strong> ",as.character(u$Organization_ID[1]),"<br>",
+      "<strong>Role:</strong> ",if("Role"%in%names(u))as.character(u$Role[1])else"Coach","<br>",
+      "<strong>User ID:</strong> <code>",current_user_id(),"</code>"
+    )))
+  })
+  
+  observeEvent(input$setting_active_user,{
+    uid<-if(is.null(input$setting_active_user))""else trimws(as.character(input$setting_active_user))
+    active_user_id(uid)
+    u<-current_user_row()
+    if(nrow(u)>0&&"Display_Name"%in%names(u))updateTextInput(session,"charting_user",value=as.character(u$Display_Name[1]))
+  },ignoreInit=TRUE)
+  
+  observeEvent(active_user_id(),{
+    req(nzchar(active_user_id()))
+    refresh_sessions_admin_data()
+    load_sessions()
+    load_report_pitches()
+    load_pitcher_report_data()
+  },ignoreInit=TRUE)
+  
   ensure_multi_user_pitch_columns <- function(){
     tryCatch({
       googlesheets4::range_write(
         ss=SHEET_URL,
-        data=data.frame(Charted_By="Charted_By",Client_ID="Client_ID",stringsAsFactors=FALSE),
-        sheet="Pitches",range="AM1:AN1",col_names=FALSE
+        data=data.frame(Charted_By="Charted_By",Client_ID="Client_ID",User_ID="User_ID",stringsAsFactors=FALSE),
+        sheet="Pitches",range="AM1:AO1",col_names=FALSE
       )
     },error=function(e){})
   }
@@ -3871,14 +4009,17 @@ server <- function(input, output, session) {
     tryCatch({
       s<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:L1001",col_names=TRUE),stringsAsFactors=FALSE), "sessions")
       if(nrow(s)>0&&"Session_ID"%in%names(s))s<-s[!is.na(s$Session_ID)&trimws(as.character(s$Session_ID))!="",,drop=FALSE]
+      if(nrow(s)>0&&"Organization_ID"%in%names(s))s<-s[trimws(as.character(s$Organization_ID))==current_org_id(),,drop=FALSE]
       sessions_admin_sessions(s)
       
-      p<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Pitches",range="A1:AN10001",col_names=TRUE),stringsAsFactors=FALSE), "pitches")
+      p<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Pitches",range="A1:AO10001",col_names=TRUE),stringsAsFactors=FALSE), "pitches")
       if(nrow(p)>0&&"Session_ID"%in%names(p))p<-p[!is.na(p$Session_ID)&trimws(as.character(p$Session_ID))!="",,drop=FALSE]
+      if(nrow(p)>0&&"Organization_ID"%in%names(p))p<-p[trimws(as.character(p$Organization_ID))==current_org_id(),,drop=FALSE]
       sessions_admin_pitches(p)
       
       pa<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Plate_Appearances",range="A1:Z10001",col_names=TRUE),stringsAsFactors=FALSE), "pa")
       if(nrow(pa)>0&&"Session_ID"%in%names(pa))pa<-pa[!is.na(pa$Session_ID)&trimws(as.character(pa$Session_ID))!="",,drop=FALSE]
+      if(nrow(pa)>0&&"Organization_ID"%in%names(pa))pa<-pa[trimws(as.character(pa$Organization_ID))==current_org_id(),,drop=FALSE]
       sessions_admin_pas(pa)
       
       choices<-if(nrow(s)>0){
@@ -4519,6 +4660,10 @@ server <- function(input, output, session) {
             sheet_url = SHEET_URL
           )
           
+          players_data <- as.data.frame(players_data,stringsAsFactors=FALSE)
+          if(nrow(players_data)>0&&"Organization_ID"%in%names(players_data)){
+            players_data<-players_data[trimws(as.character(players_data$Organization_ID))==current_org_id(),,drop=FALSE]
+          }
           player_lookup(
             players_data
           )
@@ -10603,7 +10748,7 @@ server <- function(input, output, session) {
           list("","",""),
           unname(as.list(pitch_location_data[1,])),
           unname(as.list(bullpen_extra_data[1,])),
-          list(current_charting_user(),client_instance_id)
+          list(current_charting_user(),client_instance_id,current_user_id())
         )
         append_row_atomic("Pitches",pitch_row_values)
         
@@ -13118,9 +13263,11 @@ server <- function(input, output, session) {
     compact_plate_appearances_sheet_if_needed()
     load_app_settings(update_ui=TRUE)
     
-    # V48: one backend snapshot hydrates Sessions, Pitches and PAs.
-    # Reports and leaderboards calculate from memory instead of repeatedly
-    # hitting the Google Sheets API for every reactive UI change.
+    # V52: establish User -> Organization -> Role before loading data.
+    ensure_users_sheet()
+    load_user_directory()
+    
+    # Backend snapshot is scoped to the active user's organization.
     refresh_sessions_admin_data()
     load_sessions()
     load_report_pitches()
