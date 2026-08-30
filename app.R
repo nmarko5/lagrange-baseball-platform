@@ -3174,6 +3174,12 @@ ui <- fluidPage(
 )
 
 # ==================================================
+# V58 — ROSTER DROPDOWN SANITIZATION + HEADER REPAIR
+# Built directly on V57.
+# Fixes NA season choices that disconnected Shiny and repairs roster sheet schema.
+# ==================================================
+
+# ==================================================
 # V57 — PERFORMANCE + INITIALIZATION STABILITY
 # Built directly on V56.
 # Normal startup performs reads only; roster seeding is explicit.
@@ -3685,6 +3691,32 @@ server <- function(input, output, session) {
     })
   }
   
+  repair_roster_memberships_header <- function(){
+    tryCatch({
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=data.frame(
+          Roster_Membership_ID="Roster_Membership_ID",
+          Organization_ID="Organization_ID",
+          Season_ID="Season_ID",
+          Player_ID="Player_ID",
+          Status="Status",
+          Class_Year="Class_Year",
+          Jersey_Number="Jersey_Number",
+          Primary_Position="Primary_Position",
+          stringsAsFactors=FALSE
+        ),
+        sheet="Roster_Memberships",
+        range="A1:H1",
+        col_names=FALSE
+      )
+      TRUE
+    },error=function(e){
+      roster_manage_message(paste0("Roster header repair error: ",e$message))
+      FALSE
+    })
+  }
+  
   seed_current_roster_memberships <- function(season_id=NULL){
     tryCatch({
       org<-current_org_id()
@@ -3802,18 +3834,24 @@ server <- function(input, output, session) {
       roster_memberships_directory(rm)
       
       # Session creation selectors.
-      if(nrow(s)>0){
-        vals<-as.character(s$Season_ID)
-        labs<-if("Season_Name"%in%names(s))as.character(s$Season_Name)else vals
+      if(nrow(s)>0&&"Season_ID"%in%names(s)){
+        vals<-trimws(as.character(s$Season_ID))
+        keep<-!is.na(vals)&vals!=""
+        vals<-vals[keep]
+        labs<-if("Season_Name"%in%names(s))trimws(as.character(s$Season_Name[keep]))else vals
+        bad<-is.na(labs)|labs==""
+        labs[bad]<-vals[bad]
         names(vals)<-labs
-        updateSelectInput(session,"sessions_new_season",choices=vals,selected=vals[1])
-        if("new_session_season"%in%names(input)){
-          updateSelectInput(session,"new_session_season",choices=vals,selected=vals[1])
+        vals<-vals[!duplicated(vals)]
+        
+        if(length(vals)>0){
+          updateSelectInput(session,"sessions_new_season",choices=vals,selected=unname(vals[1]))
+          if("new_session_season"%in%names(input)){
+            updateSelectInput(session,"new_session_season",choices=vals,selected=unname(vals[1]))
+          }
         }
       }
       
-      # V57: roster selectors initialize only after all four architecture tables
-      # are loaded into cache.
       initialize_roster_management_from_cache()
       
       TRUE
@@ -4181,6 +4219,12 @@ server <- function(input, output, session) {
   
   observeEvent(active_user_id(),{
     req(nzchar(active_user_id()))
+    
+    # V58: during initial startup the main startup block already loads all caches.
+    # Only reload here when this is a real user switch after initialization.
+    if(is.null(user_directory())||nrow(user_directory())==0)return()
+    if(is.null(seasons_directory())||nrow(seasons_directory())==0)return()
+    
     load_season_architecture()
     refresh_sessions_admin_data()
     load_sessions()
@@ -4491,36 +4535,77 @@ server <- function(input, output, session) {
   initialize_roster_management_from_cache <- function(){
     s<-seasons_directory()
     
-    if(is.null(s)||nrow(s)==0){
+    if(is.null(s)||nrow(s)==0||!"Season_ID"%in%names(s)){
       updateSelectInput(
         session,
         "roster_manage_season",
         choices=c("No baseball years"=""),
         selected=""
       )
-      updateSelectizeInput(
+      return(invisible(FALSE))
+    }
+    
+    # V58: sanitize Season_ID / Season_Name before handing choices to Shiny.
+    season_ids<-trimws(as.character(s$Season_ID))
+    keep<-!is.na(season_ids)&season_ids!=""
+    s<-s[keep,,drop=FALSE]
+    season_ids<-season_ids[keep]
+    
+    if(nrow(s)==0||length(season_ids)==0){
+      updateSelectInput(
         session,
-        "roster_manage_players",
-        choices=character(0),
-        selected=character(0),
-        server=TRUE
+        "roster_manage_season",
+        choices=c("No baseball years"=""),
+        selected=""
       )
       return(invisible(FALSE))
     }
     
-    vals<-as.character(s$Season_ID)
-    labs<-if("Season_Name"%in%names(s))as.character(s$Season_Name)else vals
-    names(vals)<-labs
+    season_names<-if("Season_Name"%in%names(s)){
+      trimws(as.character(s$Season_Name))
+    }else{
+      season_ids
+    }
+    
+    bad_name<-is.na(season_names)|season_names==""
+    season_names[bad_name]<-season_ids[bad_name]
+    
+    vals<-season_ids
+    names(vals)<-season_names
+    
+    # Guarantee unique, non-NA choice values and labels.
+    good<-!is.na(vals)&vals!=""&!is.na(names(vals))&names(vals)!=""
+    vals<-vals[good]
+    vals<-vals[!duplicated(vals)]
+    
+    if(length(vals)==0){
+      updateSelectInput(
+        session,
+        "roster_manage_season",
+        choices=c("No baseball years"=""),
+        selected=""
+      )
+      return(invisible(FALSE))
+    }
     
     cur<-isolate(input$roster_manage_season)
-    if(is.null(cur)||!nzchar(cur)||!cur%in%unname(vals)){
-      # Prefer active season.
+    
+    if(is.null(cur)||is.na(cur)||!nzchar(cur)||!cur%in%unname(vals)){
       active_idx<-integer(0)
+      
       if("Active"%in%names(s)){
         a<-toupper(trimws(as.character(s$Active)))
-        active_idx<-which(a%in%c("TRUE","T","1","YES","Y","ACTIVE"))
+        active_idx<-which(
+          !is.na(a)&a%in%c("TRUE","T","1","YES","Y","ACTIVE")
+        )
       }
-      cur<-if(length(active_idx)>0)as.character(s$Season_ID[active_idx[1]])else vals[1]
+      
+      if(length(active_idx)>0){
+        candidate<-trimws(as.character(s$Season_ID[active_idx[1]]))
+        cur<-if(!is.na(candidate)&&nzchar(candidate)&&candidate%in%unname(vals))candidate else unname(vals[1])
+      }else{
+        cur<-unname(vals[1])
+      }
     }
     
     updateSelectInput(
@@ -4530,46 +4615,60 @@ server <- function(input, output, session) {
       selected=cur
     )
     
-    # Roster player choices come from the already-loaded player cache.
+    # Do not initialize player choices until the season cache is valid.
     players<-player_lookup()
+    
     if(is.null(players)||nrow(players)==0||!"Player_ID"%in%names(players)){
-      updateSelectizeInput(
-        session,
-        "roster_manage_players",
-        choices=character(0),
-        selected=character(0),
-        server=TRUE
-      )
       return(invisible(TRUE))
     }
     
-    players<-players[
-      !is.na(players$Player_ID)&trimws(as.character(players$Player_ID))!="",
-      ,
-      drop=FALSE
-    ]
+    player_ids<-trimws(as.character(players$Player_ID))
+    pkeep<-!is.na(player_ids)&player_ids!=""
+    players<-players[pkeep,,drop=FALSE]
+    player_ids<-player_ids[pkeep]
+    
+    if(nrow(players)==0||length(player_ids)==0){
+      return(invisible(TRUE))
+    }
     
     labels<-if("Display_Name"%in%names(players)){
-      as.character(players$Display_Name)
+      trimws(as.character(players$Display_Name))
     }else{
-      as.character(players$Player_ID)
+      player_ids
     }
+    
+    bad_label<-is.na(labels)|labels==""
+    labels[bad_label]<-player_ids[bad_label]
     
     if("Primary_Position"%in%names(players)){
       pos<-trimws(as.character(players$Primary_Position))
-      labels<-ifelse(is.na(pos)|pos=="",labels,paste0(labels," — ",pos))
+      labels<-ifelse(
+        is.na(pos)|pos=="",
+        labels,
+        paste0(labels," — ",pos)
+      )
     }
     
-    choices<-as.character(players$Player_ID)
+    choices<-player_ids
     names(choices)<-labels
+    
+    goodp<-!is.na(choices)&choices!=""&!is.na(names(choices))&names(choices)!=""
+    choices<-choices[goodp]
+    choices<-choices[!duplicated(choices)]
     
     rm<-roster_memberships_directory()
     selected<-character(0)
     
     if(!is.null(rm)&&nrow(rm)>0&&all(c("Season_ID","Player_ID","Status")%in%names(rm))){
       status<-toupper(trimws(as.character(rm$Status)))
-      hit<-trimws(as.character(rm$Season_ID))==trimws(cur)&status=="ACTIVE"
-      selected<-as.character(rm$Player_ID[hit])
+      season_col<-trimws(as.character(rm$Season_ID))
+      player_col<-trimws(as.character(rm$Player_ID))
+      
+      hit<-!is.na(season_col)&season_col==trimws(cur)&
+        !is.na(status)&status=="ACTIVE"&
+        !is.na(player_col)&player_col!=""
+      
+      selected<-player_col[hit]
       selected<-selected[selected%in%unname(choices)]
     }
     
@@ -4610,6 +4709,10 @@ server <- function(input, output, session) {
   },ignoreInit=TRUE)
   
   observeEvent(player_lookup(),{
+    s<-seasons_directory()
+    if(is.null(s)||nrow(s)==0||!"Season_ID"%in%names(s))return()
+    valid_ids<-trimws(as.character(s$Season_ID))
+    if(!any(!is.na(valid_ids)&valid_ids!=""))return()
     refresh_roster_management_ui()
   },ignoreInit=TRUE)
   
@@ -14273,6 +14376,7 @@ server <- function(input, output, session) {
       compact_plate_appearances_sheet_if_needed()
       ensure_users_sheet()
       ensure_season_architecture_sheets()
+      repair_roster_memberships_header()
       seed_lagrange_2026_27_architecture()
       
       compact_architecture_sheet("Seasons","F","Season_ID",5001)
