@@ -373,16 +373,23 @@ ui <- fluidPage(
         align-items: stretch;
         margin-top: 14px;
         width: 100%;
+
+        /* V51: if the browser becomes too narrow, scroll the row rather
+           than resizing the coordinate system inside each heat map. */
+        overflow-x: auto;
+        overflow-y: visible;
+        padding-bottom: 5px;
       }
 
       .heatmap-panel {
-        flex: 1 1 0;
-        min-width: 0;
+        /* V51: every panel keeps enough room for the locked 250px stage. */
+        flex: 1 0 270px;
+        min-width: 270px;
         padding: 10px 7px 9px 7px;
         border: 1px solid #e1e1e1;
         border-radius: 7px;
         background-color: #ffffff;
-        overflow: hidden;
+        overflow: visible;
       }
 
       .heatmap-panel .heatmap-title {
@@ -416,7 +423,8 @@ ui <- fluidPage(
            This prevents the silhouette from drifting when the browser
            is resized or switched between windowed and full screen. */
         width: 250px;
-        max-width: 100%;
+        min-width: 250px;
+        max-width: none;
         height: 205px;
         margin: 0 auto;
 
@@ -522,10 +530,14 @@ ui <- fluidPage(
 
       .report-breakdown-grid {
         display: grid;
-        grid-template-columns: 1fr 1.08fr .95fr 1.08fr;
-        gap: 8px;
+
+        /* V51: two roomy cards per row so Pitch Type, Count and Results
+           can display every column instead of clipping the right side. */
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
         margin-top: 10px;
         margin-bottom: 14px;
+        align-items: start;
       }
 
       .report-breakdown-card {
@@ -534,6 +546,9 @@ ui <- fluidPage(
         background: #ffffff;
         padding: 10px 10px 8px 10px;
         min-width: 0;
+        height: auto;
+        max-height: none;
+        overflow: visible;
       }
 
       .report-breakdown-title {
@@ -548,6 +563,7 @@ ui <- fluidPage(
         width: 100%;
         margin-bottom: 0;
         font-size: 10px;
+        table-layout: auto;
       }
 
       .report-breakdown-card table th {
@@ -664,7 +680,7 @@ ui <- fluidPage(
         color: #b51f24;
       }
 
-      @media (max-width: 1150px) {
+      @media (max-width: 850px) {
         .report-breakdown-grid {
           grid-template-columns: 1fr;
         }
@@ -1607,42 +1623,12 @@ ui <- fluidPage(
       @media (max-width:950px) { .pitcher-topbar{grid-template-columns:1fr;} .pitcher-filter-grid{grid-template-columns:1fr 1fr;} .pitcher-section-grid-2{grid-template-columns:1fr;} }
 
       @media (max-width: 1050px) {
-        .heatmap-row {
-          overflow-x: auto;
-          padding-bottom: 5px;
-        }
-
+        /* V51: intentionally do NOT resize the hitter visualization.
+           The row scrolls horizontally instead, preserving the exact
+           batter-to-strike-zone spacing at every browser width. */
         .heatmap-panel {
-          flex: 0 0 210px;
-        }
-
-        .heatmap-visual-wrap {
-          width: 200px;
-          height: 205px;
-        }
-
-        .heatmap-plot-wrap {
-          width: 150px;
-          min-width: 150px;
-        }
-
-        .heatmap-plot-wrap > div {
-          width: 150px;
-          max-width: 150px;
-        }
-
-        .batter-silhouette {
-          width: 88px;
-          height: 184px;
-        }
-
-        .batter-silhouette.rhh,
-        .batter-silhouette.switch {
-          left: 15px;
-        }
-
-        .batter-silhouette.lhh {
-          right: 15px;
+          flex: 0 0 270px;
+          min-width: 270px;
         }
       }
 "))
@@ -3157,6 +3143,12 @@ ui <- fluidPage(
 # Built on V48 backend caching/quota fix
 #
 # V48 — CONNECT CLOUD BACKEND CACHE / QUOTA FIX
+# ==================================================
+
+# ==================================================
+# V51 — RESPONSIVE HEATMAP STAGE + EXPANDED REPORT TABLES
+# Built directly on the working V49 baseline.
+# The discarded V50 is not included.
 # ==================================================
 
 # ==================================================
