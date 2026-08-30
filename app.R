@@ -3139,6 +3139,14 @@ ui <- fluidPage(
                       "the player's identity or historical data from earlier seasons.")
               ),
               div(class="admin-card",
+                  div(class="admin-title","Backend Maintenance"),
+                  div(class="admin-note",
+                      "Maintenance is manual in V59 so normal startup stays fast. ",
+                      "Use this only when backend schemas need repair or after adding a new organization/season."),
+                  actionButton("run_backend_maintenance","RUN BACKEND MAINTENANCE"),
+                  uiOutput("backend_maintenance_status")
+              ),
+              div(class="admin-card",
                   div(class="admin-title","Multi-User / Server Readiness"),
                   uiOutput("settings_multi_user_status"),
                   div(class="connection-card",uiOutput("settings_connection_status")),
@@ -3172,6 +3180,12 @@ ui <- fluidPage(
     
   )
 )
+
+# ==================================================
+# V59 — FAST STARTUP / READ-ONLY BOOT
+# Built directly on V58.
+# Normal app startup performs no backend maintenance writes.
+# ==================================================
 
 # ==================================================
 # V58 — ROSTER DROPDOWN SANITIZATION + HEADER REPAIR
@@ -4047,6 +4061,11 @@ server <- function(input, output, session) {
       if(length(fallback)>0)access<-fallback[1]
     }
     
+    # V59 LaGrange development fallback until commercial billing enforcement is enabled.
+    if(access=="Not configured"&&current_org_id()=="LAGRANGE"&&season_id=="LAGRANGE_2026_27"){
+      access<-"Development"
+    }
+    
     div(class="multi-user-ready",HTML(paste0(
       "<strong>Baseball year:</strong> ",season_name,"<br>",
       "<strong>Fall period:</strong> ",ifelse(nzchar(fall_name),fall_name,"—")," (development / non-official stats)<br>",
@@ -4212,19 +4231,32 @@ server <- function(input, output, session) {
   
   observeEvent(input$setting_active_user,{
     uid<-if(is.null(input$setting_active_user))""else trimws(as.character(input$setting_active_user))
+    if(!nzchar(uid))return()
+    
+    # V59: only a deliberate user change triggers an org refresh.
+    if(uid==active_user_id())return()
+    
     active_user_id(uid)
-    u<-current_user_row()
-    if(nrow(u)>0&&"Display_Name"%in%names(u))updateTextInput(session,"charting_user",value=as.character(u$Display_Name[1]))
+    load_season_architecture()
+    refresh_sessions_admin_data()
+    load_sessions()
+    load_report_pitches()
+    load_pitcher_report_data()
   },ignoreInit=TRUE)
   
-  observeEvent(active_user_id(),{
-    req(nzchar(active_user_id()))
+  observeEvent(input$setting_active_user,{
+    uid<-if(is.null(input$setting_active_user))""else trimws(as.character(input$setting_active_user))
+    if(!nzchar(uid))return()
+    if(uid==active_user_id())return()
     
-    # V58: during initial startup the main startup block already loads all caches.
-    # Only reload here when this is a real user switch after initialization.
-    if(is.null(user_directory())||nrow(user_directory())==0)return()
-    if(is.null(seasons_directory())||nrow(seasons_directory())==0)return()
+    active_user_id(uid)
     
+    u<-current_user_row()
+    if(nrow(u)>0&&"Display_Name"%in%names(u)){
+      updateTextInput(session,"charting_user",value=as.character(u$Display_Name[1]))
+    }
+    
+    # Deliberate org/user switch: refresh once.
     load_season_architecture()
     refresh_sessions_admin_data()
     load_sessions()
@@ -4905,6 +4937,49 @@ server <- function(input, output, session) {
       
     },error=function(e){
       roster_manage_message(paste0("Roster save error: ",e$message))
+    })
+  })
+  
+  backend_maintenance_message<-reactiveVal(NULL)
+  
+  output$backend_maintenance_status<-renderUI({
+    msg<-backend_maintenance_message()
+    if(is.null(msg)||!nzchar(msg))return(NULL)
+    div(
+      class=if(grepl("error",tolower(msg)))"warning-text"else"success-text",
+      msg
+    )
+  })
+  
+  observeEvent(input$run_backend_maintenance,{
+    backend_maintenance_message("Running backend maintenance...")
+    
+    tryCatch({
+      ensure_multi_user_pitch_columns()
+      compact_pitches_sheet_if_needed()
+      compact_plate_appearances_sheet_if_needed()
+      ensure_users_sheet()
+      ensure_season_architecture_sheets()
+      repair_roster_memberships_header()
+      seed_lagrange_2026_27_architecture()
+      
+      compact_architecture_sheet("Seasons","F","Season_ID",5001)
+      compact_architecture_sheet("Periods","I","Period_ID",5001)
+      compact_architecture_sheet("Subscriptions","G","Subscription_ID",5001)
+      compact_architecture_sheet("Roster_Memberships","H","Roster_Membership_ID",5001)
+      
+      load_user_directory()
+      load_season_architecture()
+      backfill_session_season_period()
+      refresh_sessions_admin_data()
+      load_sessions()
+      load_report_pitches()
+      load_pitcher_report_data()
+      
+      backend_maintenance_message("Backend maintenance completed successfully.")
+      
+    },error=function(e){
+      backend_maintenance_message(paste0("Backend maintenance error: ",e$message))
     })
   })
   
@@ -14367,38 +14442,25 @@ server <- function(input, output, session) {
   # STARTUP INITIALIZATION
   # ==================================================
   observeEvent(TRUE,{
+    # ==================================================
+    # V59 FAST STARTUP
+    # ==================================================
+    # Normal app boot is READ-ONLY against the already-configured backend.
+    # No header rewrites, sheet creation, compaction, seeding, or historical
+    # backfill occur here.
+    
     load_app_settings(update_ui=TRUE)
+    load_user_directory()
+    load_season_architecture()
     
-    # V57: one-time worker maintenance only.
-    if(!isTRUE(v55_process_state$maintenance_done)){
-      ensure_multi_user_pitch_columns()
-      compact_pitches_sheet_if_needed()
-      compact_plate_appearances_sheet_if_needed()
-      ensure_users_sheet()
-      ensure_season_architecture_sheets()
-      repair_roster_memberships_header()
-      seed_lagrange_2026_27_architecture()
-      
-      compact_architecture_sheet("Seasons","F","Season_ID",5001)
-      compact_architecture_sheet("Periods","I","Period_ID",5001)
-      compact_architecture_sheet("Subscriptions","G","Subscription_ID",5001)
-      compact_architecture_sheet("Roster_Memberships","H","Roster_Membership_ID",5001)
-      
-      load_user_directory()
-      load_season_architecture()
-      backfill_session_season_period()
-      
-      v55_process_state$maintenance_done <- TRUE
-    }else{
-      # Normal browser startup: reads only, no architecture writes.
-      load_user_directory()
-      load_season_architecture()
-    }
-    
+    # One backend snapshot for Sessions / Pitches / Plate Appearances.
     refresh_sessions_admin_data()
+    
+    # Hydrate all UI/report caches from memory.
     load_sessions()
     load_report_pitches()
     load_pitcher_report_data()
+    
   },once=TRUE)
   
 }
