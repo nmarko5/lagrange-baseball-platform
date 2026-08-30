@@ -3770,8 +3770,17 @@ server <- function(input, output, session) {
       
       {
         
-        sessions_data <- gs_read_sessions(
-          sheet_url = SHEET_URL
+        # Read Sessions directly from Google Sheets so Live Charting uses the
+        # same fresh source as the Sessions admin page. This prevents newly
+        # created sessions from being missing from the Live Charting dropdown.
+        sessions_data <- as.data.frame(
+          googlesheets4::range_read(
+            ss = SHEET_URL,
+            sheet = "Sessions",
+            range = "A1:L1001",
+            col_names = TRUE
+          ),
+          stringsAsFactors = FALSE
         )
         
         if (
