@@ -3153,8 +3153,114 @@ ui <- fluidPage(
 )
 
 # ==================================================
+# V49 — REPORT DATA TYPE NORMALIZATION
+# Built on V48 backend caching/quota fix
+#
 # V48 — CONNECT CLOUD BACKEND CACHE / QUOTA FIX
 # ==================================================
+
+# ==================================================
+# V49 — CONNECT CLOUD TYPE NORMALIZATION FIX
+# ==================================================
+# googlesheets4 can return some columns as list-columns when Sheets contain
+# mixed cell types. The reporting/scoring code expects ordinary atomic vectors.
+# Normalize the backend snapshot once before any reports use it.
+
+v49_flatten_column <- function(x) {
+  if (is.list(x)) {
+    return(vapply(
+      x,
+      function(value) {
+        if (is.null(value) || length(value) == 0) {
+          return(NA_character_)
+        }
+        value <- unlist(value, recursive = TRUE, use.names = FALSE)
+        if (length(value) == 0 || all(is.na(value))) {
+          return(NA_character_)
+        }
+        as.character(value[[1]])
+      },
+      character(1),
+      USE.NAMES = FALSE
+    ))
+  }
+  
+  if (is.factor(x)) {
+    return(as.character(x))
+  }
+  
+  x
+}
+
+v49_normalize_sheet_data <- function(df, type = c("generic", "pitches", "pa", "sessions", "players")) {
+  type <- match.arg(type)
+  
+  if (is.null(df)) {
+    return(data.frame(stringsAsFactors = FALSE))
+  }
+  
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+  
+  # Flatten every list-column first. This is the core Connect Cloud fix.
+  for (nm in names(df)) {
+    if (is.list(df[[nm]]) || is.factor(df[[nm]])) {
+      df[[nm]] <- v49_flatten_column(df[[nm]])
+    }
+  }
+  
+  numeric_cols <- switch(
+    type,
+    pitches = c(
+      "Balls_Before", "Strikes_Before", "Pitch_Number",
+      "Decision_Score", "Contact_Modifier", "Final_Score",
+      "Location_X", "Location_Y",
+      "Inning", "Outs_Before",
+      "Bullpen_Target_X", "Bullpen_Target_Y"
+    ),
+    pa = c(
+      "PA_Number", "PA_Pitches", "Pitches_After_2K", "RBI"
+    ),
+    players = c(
+      "Jersey_Number", "Height", "Weight"
+    ),
+    character(0)
+  )
+  
+  integer_cols <- switch(
+    type,
+    pitches = c(
+      "Balls_Before", "Strikes_Before", "Pitch_Number",
+      "Inning", "Outs_Before"
+    ),
+    pa = c(
+      "PA_Number", "PA_Pitches", "Pitches_After_2K", "RBI"
+    ),
+    players = c("Jersey_Number"),
+    character(0)
+  )
+  
+  for (nm in intersect(numeric_cols, names(df))) {
+    values <- v49_flatten_column(df[[nm]])
+    suppressWarnings(df[[nm]] <- as.numeric(values))
+  }
+  
+  for (nm in intersect(integer_cols, names(df))) {
+    values <- v49_flatten_column(df[[nm]])
+    suppressWarnings(df[[nm]] <- as.integer(values))
+  }
+  
+  # Everything else must still be atomic. Convert any surviving unusual
+  # column type to character rather than allowing a list-column downstream.
+  for (nm in names(df)) {
+    if (is.list(df[[nm]])) {
+      df[[nm]] <- v49_flatten_column(df[[nm]])
+    }
+  }
+  
+  df
+}
+
+
 # ==================================================
 # SERVER
 # ==================================================
@@ -3771,15 +3877,15 @@ server <- function(input, output, session) {
   
   refresh_sessions_admin_data <- function(){
     tryCatch({
-      s<-as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:L1001",col_names=TRUE),stringsAsFactors=FALSE)
+      s<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:L1001",col_names=TRUE),stringsAsFactors=FALSE), "sessions")
       if(nrow(s)>0&&"Session_ID"%in%names(s))s<-s[!is.na(s$Session_ID)&trimws(as.character(s$Session_ID))!="",,drop=FALSE]
       sessions_admin_sessions(s)
       
-      p<-as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Pitches",range="A1:AN10001",col_names=TRUE),stringsAsFactors=FALSE)
+      p<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Pitches",range="A1:AN10001",col_names=TRUE),stringsAsFactors=FALSE), "pitches")
       if(nrow(p)>0&&"Session_ID"%in%names(p))p<-p[!is.na(p$Session_ID)&trimws(as.character(p$Session_ID))!="",,drop=FALSE]
       sessions_admin_pitches(p)
       
-      pa<-as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Plate_Appearances",range="A1:Z10001",col_names=TRUE),stringsAsFactors=FALSE)
+      pa<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Plate_Appearances",range="A1:Z10001",col_names=TRUE),stringsAsFactors=FALSE), "pa")
       if(nrow(pa)>0&&"Session_ID"%in%names(pa))pa<-pa[!is.na(pa$Session_ID)&trimws(as.character(pa$Session_ID))!="",,drop=FALSE]
       sessions_admin_pas(pa)
       
@@ -4976,7 +5082,7 @@ server <- function(input, output, session) {
     tryCatch({
       d <- sessions_admin_pitches()
       if(is.null(d)) d <- data.frame()
-      d <- as.data.frame(d,stringsAsFactors=FALSE)
+      d <- v49_normalize_sheet_data(as.data.frame(d,stringsAsFactors=FALSE), "pitches")
       
       if(nrow(d)>0){
         meaningful_cols <- intersect(
@@ -5007,7 +5113,7 @@ server <- function(input, output, session) {
     tryCatch({
       p <- sessions_admin_pas()
       if(is.null(p)) p <- data.frame()
-      pitcher_report_pa_raw(as.data.frame(p,stringsAsFactors=FALSE))
+      pitcher_report_pa_raw(v49_normalize_sheet_data(as.data.frame(p,stringsAsFactors=FALSE), "pa"))
     },error=function(e){
       pitcher_report_pa_raw(data.frame())
     })
@@ -5087,7 +5193,7 @@ server <- function(input, output, session) {
     ch<-as.character(d$Zone_Group)%in%c("Chase","Waste")
     zn<-as.character(d$Zone_Group)%in%c("Heart","Shadow")
     lv<-vapply(d$Count,p_lev,character(1));ld<-sum(lv%in%c("Ahead","Even","Behind"),na.rm=TRUE)
-    inn<-if("Inning"%in%names(d))suppressWarnings(as.integer(d$Inning))else rep(NA_integer_,n)
+    inn<-if("Inning"%in%names(d))suppressWarnings(as.integer(v49_flatten_column(d$Inning)))else rep(NA_integer_,n)
     half<-if("Half_Inning"%in%names(d))as.character(d$Half_Inning)else rep("",n)
     vi<-is.finite(inn);eff<-api<-NA_real_;ni<-0
     if(any(vi)&&"Session_ID"%in%names(d)){
@@ -5204,7 +5310,7 @@ server <- function(input, output, session) {
   output$pitcher_report_status <- renderUI({e<-pitcher_report_error();d<-pitcher_pitches();if(!is.null(e))div(class="warning-text",paste0("Pitcher report load error: ",e))else div(class="success-text",paste0("Report loaded from ",nrow(d)," charted pitches."))})
   output$pitcher_count_leverage <- renderUI({d<-pitcher_pitches();if(nrow(d)==0)return(div(class="report-breakdown-note","No count data available."));lv<-vapply(d$Count,p_lev,character(1));den<-sum(lv%in%c("Ahead","Even","Behind"));f<-function(z)p_pct(p_rate(sum(lv==z),den));div(class="count-leverage-strip",div(class="count-leverage-cell",div(class="count-leverage-label","Ahead"),div(class="count-leverage-value pitch-eff-good",f("Ahead"))),div(class="count-leverage-cell",div(class="count-leverage-label","Even"),div(class="count-leverage-value",f("Even"))),div(class="count-leverage-cell",div(class="count-leverage-label","Behind"),div(class="count-leverage-value pitch-eff-poor",f("Behind"))))})
   
-  output$pitcher_inning_efficiency_table <- renderUI({d<-pitcher_pitches();if(nrow(d)==0||!"Inning"%in%names(d)||!"Session_ID"%in%names(d))return(div(class="report-breakdown-note","No inning data available yet."));inn<-suppressWarnings(as.integer(d$Inning));v<-is.finite(inn);if(!any(v))return(div(class="report-breakdown-note","No inning values are stored yet. New pitches charted with this version will include inning."));x<-d[v,,drop=FALSE];x$Inn<-inn[v];x$Half<-if("Half_Inning"%in%names(x))as.character(x$Half_Inning)else"";keys<-unique(paste(x$Session_ID,x$Inn,x$Half,sep="__"));rr<-lapply(keys,function(k){p<-strsplit(k,"__",fixed=TRUE)[[1]];z<-x[as.character(x$Session_ID)==p[1]&x$Inn==as.integer(p[2]),,drop=FALSE];st<-sum(p_strike(z$Pitch_Result));data.frame(Session=p[1],Inning=as.integer(p[2]),Pitches=nrow(z),Strikes=st,Balls=nrow(z)-st,Strike=p_rate(st,nrow(z)),Eff=nrow(z)<=15)});df<-do.call(rbind,rr);body<-lapply(seq_len(nrow(df)),function(i){r<-df[i,,drop=FALSE];tags$tr(class=if(r$Eff)"inning-efficient"else"inning-over",ptd(r$Session),ptd(r$Inning),ptd(r$Pitches),ptd(r$Strikes),ptd(r$Balls),ptd(p_pct(r$Strike)),ptd(if(r$Eff)"YES"else"NO"))});tags$table(class="table table-striped table-condensed",phead(c("Session","Inn","Pitches","Strikes","Balls","Strike %","≤15?")),tags$tbody(body))})
+  output$pitcher_inning_efficiency_table <- renderUI({d<-pitcher_pitches();if(nrow(d)==0||!"Inning"%in%names(d)||!"Session_ID"%in%names(d))return(div(class="report-breakdown-note","No inning data available yet."));inn<-suppressWarnings(as.integer(v49_flatten_column(d$Inning)));v<-is.finite(inn);if(!any(v))return(div(class="report-breakdown-note","No inning values are stored yet. New pitches charted with this version will include inning."));x<-d[v,,drop=FALSE];x$Inn<-inn[v];x$Half<-if("Half_Inning"%in%names(x))as.character(x$Half_Inning)else"";keys<-unique(paste(x$Session_ID,x$Inn,x$Half,sep="__"));rr<-lapply(keys,function(k){p<-strsplit(k,"__",fixed=TRUE)[[1]];z<-x[as.character(x$Session_ID)==p[1]&x$Inn==as.integer(p[2]),,drop=FALSE];st<-sum(p_strike(z$Pitch_Result));data.frame(Session=p[1],Inning=as.integer(p[2]),Pitches=nrow(z),Strikes=st,Balls=nrow(z)-st,Strike=p_rate(st,nrow(z)),Eff=nrow(z)<=15)});df<-do.call(rbind,rr);body<-lapply(seq_len(nrow(df)),function(i){r<-df[i,,drop=FALSE];tags$tr(class=if(r$Eff)"inning-efficient"else"inning-over",ptd(r$Session),ptd(r$Inning),ptd(r$Pitches),ptd(r$Strikes),ptd(r$Balls),ptd(p_pct(r$Strike)),ptd(if(r$Eff)"YES"else"NO"))});tags$table(class="table table-striped table-condensed",phead(c("Session","Inn","Pitches","Strikes","Balls","Strike %","≤15?")),tags$tbody(body))})
   
   p_arsenal <- reactive({d<-pitcher_pitches();if(nrow(d)==0)return(data.frame());pts<-trimws(as.character(d$Pitch_Type));d<-d[!is.na(pts)&pts!=""&pts!="None",,drop=FALSE];pts<-trimws(as.character(d$Pitch_Type));if(nrow(d)==0)return(data.frame());do.call(rbind,lapply(unique(pts),function(pt){z<-d[pts==pt,,drop=FALSE];n<-nrow(z);st<-p_strike(z$Pitch_Result);sw<-as.character(z$Swing_Take)=="Swing";wh<-as.character(z$Pitch_Result)=="Whiff";ch<-as.character(z$Zone_Group)%in%c("Chase","Waste");zn<-as.character(z$Zone_Group)%in%c("Heart","Shadow");cq<-as.character(z$Contact_Quality);cd<-sum(cq%in%c("Hard","Average","Avg","Weak"));pg<-if("Pitch_Group"%in%names(z))z$Pitch_Group[1]else NA;data.frame(Pitch=pt,Group=p_group(pt,pg),Pitches=n,Usage=p_rate(n,nrow(d)),Strike=p_rate(sum(st),n),Zone=p_rate(sum(zn),n),Swing=p_rate(sum(sw),n),Whiff=p_rate(sum(wh),sum(sw)),Chase=p_rate(sum(ch&sw),sum(ch)),Hard=p_rate(sum(cq=="Hard"),cd),stringsAsFactors=FALSE)}))})
   p_colored_td <- function(display,value,avg,higher=TRUE,tol=.02){tags$td(class=p_bench_class(value,avg,higher,tol),display)}
@@ -5230,7 +5336,7 @@ server <- function(input, output, session) {
     if(!is.null(side_sel)&&side_sel!=""&&side_sel!="ALL"&&"Batter_ID"%in%names(d)){
       lu<-player_lookup();if(nrow(lu)>0&&all(c("Player_ID","Bats")%in%names(lu))){idx<-match(as.character(d$Batter_ID),as.character(lu$Player_ID));bs<-toupper(as.character(lu$Bats[idx]));d<-d[bs==side_sel,,drop=FALSE]}
     }
-    x<-suppressWarnings(as.numeric(d$Location_X));y<-suppressWarnings(as.numeric(d$Location_Y));k<-is.finite(x)&is.finite(y)&x>=0&x<=1&y>=0&y<=1;data.frame(X=x[k],Y=y[k])
+    x<-suppressWarnings(as.numeric(v49_flatten_column(d$Location_X)));y<-suppressWarnings(as.numeric(v49_flatten_column(d$Location_Y)));k<-is.finite(x)&is.finite(y)&x>=0&x<=1&y>=0&y<=1;data.frame(X=x[k],Y=y[k])
   })
   p_color <- function(v)c("#2459E6","#1FAEE0","#39DC44","#FFCD37","#EF3124")[min(5,max(1,1+floor(max(0,min(1,v))*4)))]
   p_heat <- function(sp){xmin<-.10;xmax<-.90;ymin<-.08;ymax<-.84;px<-40;py<-18;pw<-300;ph<-285;nc<-48;nr<-46;bw<-.075;den<-matrix(0,nr,nc);if(nrow(sp)>0)for(r in seq_len(nr))for(c in seq_len(nc)){cx<-xmin+((c-.5)/nc)*(xmax-xmin);cy<-ymin+((r-.5)/nr)*(ymax-ymin);dd<-sqrt((sp$X-cx)^2+(sp$Y-cy)^2);den[r,c]<-sum(exp(-.5*(dd/bw)^2))};mx<-max(den);if(!is.finite(mx)||mx<=0)mx<-1;cw<-pw/nc;ch<-ph/nr;cells<-character();for(r in seq_len(nr))for(c in seq_len(nc)){v<-den[r,c]/mx;if(v<.025)next;cells<-c(cells,paste0('<rect x="',round(px+(c-1)*cw,2),'" y="',round(py+(r-1)*ch,2),'" width="',round(cw+.8,2),'" height="',round(ch+.8,2),'" fill="',p_color(v),'" fill-opacity="',round(min(.95,.10+.88*v),3),'" stroke="none"/>'))};sl<-202/520;sr<-318/520;st<-200/520;sb<-335/520;mxp<-function(v)px+pw*((v-xmin)/(xmax-xmin));myp<-function(v)py+ph*((v-ymin)/(ymax-ymin));sx<-mxp(sl);sy<-myp(st);sw<-mxp(sr)-sx;sh<-myp(sb)-sy;zone<-paste0('<rect x="',sx,'" y="',sy,'" width="',sw,'" height="',sh,'" fill="none" stroke="#2F2F2F" stroke-width="1.7"/>');platey<-sy+sh+25;plate<-paste0('<polygon points="157,',platey,' 223,',platey,' 231,',platey+7,' 190,',platey+18,' 149,',platey+7,'" fill="#fff" stroke="#333" stroke-width="1.3"/>');empty<-if(nrow(sp)==0)'<text x="190" y="155" text-anchor="middle" font-size="13" fill="#666">No exact pitch-location data available</text>'else'';HTML(paste0('<div class="pitcher-location-svg"><svg viewBox="0 0 380 340" width="100%" xmlns="http://www.w3.org/2000/svg"><rect x="40" y="18" width="300" height="285" fill="#fff"/>',paste0(cells,collapse=''),zone,plate,empty,'</svg></div>'))}
@@ -5789,8 +5895,8 @@ server <- function(input, output, session) {
       return()
     }
     
-    ax<-suppressWarnings(as.numeric(d$Location_X))
-    ay<-suppressWarnings(as.numeric(d$Location_Y))
+    ax<-suppressWarnings(as.numeric(v49_flatten_column(d$Location_X)))
+    ay<-suppressWarnings(as.numeric(v49_flatten_column(d$Location_Y)))
     tx<-suppressWarnings(as.numeric(d$Bullpen_Target_X))
     ty<-suppressWarnings(as.numeric(d$Bullpen_Target_Y))
     keep<-is.finite(ax)&is.finite(ay)&is.finite(tx)&is.finite(ty)
@@ -7743,7 +7849,10 @@ server <- function(input, output, session) {
         if(is.null(pitches_data)) pitches_data <- data.frame()
         
         report_pitches(
-          as.data.frame(pitches_data, stringsAsFactors = FALSE)
+          v49_normalize_sheet_data(
+            as.data.frame(pitches_data, stringsAsFactors = FALSE),
+            "pitches"
+          )
         )
         
         report_load_error(NULL)
@@ -7760,7 +7869,10 @@ server <- function(input, output, session) {
         if(is.null(pa_data)) pa_data <- data.frame()
         
         report_plate_appearances(
-          as.data.frame(pa_data, stringsAsFactors = FALSE)
+          v49_normalize_sheet_data(
+            as.data.frame(pa_data, stringsAsFactors = FALSE),
+            "pa"
+          )
         )
       },
       error = function(e) {
