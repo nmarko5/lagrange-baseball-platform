@@ -1,5 +1,6 @@
 library(shiny)
 library(googlesheets4)
+library(readxl)
 
 # ==================================================
 # GOOGLE SHEET CONNECTION
@@ -39,6 +40,7 @@ source("R/scoring_engine.R")
 ui <- fluidPage(
   
   tags$head(
+    uiOutput("org_theme_css"),
     tags$style(HTML("
 
       body {
@@ -57,7 +59,7 @@ ui <- fluidPage(
         top: 0;
         bottom: 0;
         width: 148px;
-        background: linear-gradient(180deg, #8e0000 0%, #a80000 58%, #7a0000 100%);
+        background: linear-gradient(180deg, var(--org-primary, #8e0000) 0%, var(--org-secondary, #a80000) 58%, var(--org-primary-dark, #7a0000) 100%);
         color: #ffffff;
         z-index: 1100;
         box-shadow: 2px 0 8px rgba(0,0,0,.16);
@@ -106,7 +108,7 @@ ui <- fluidPage(
       }
 
       .app-nav-item.active {
-        background: #d20b0b;
+        background: var(--org-accent, #d20b0b);
         box-shadow: inset 4px 0 0 #ffffff;
       }
 
@@ -1664,15 +1666,7 @@ ui <- fluidPage(
     
     div(
       class = "app-sidebar-logo-wrap",
-      tags$img(
-        class = "app-sidebar-logo",
-        src = "lagrange_logo.png",
-        onerror = "this.style.display='none';"
-      ),
-      div(
-        class = "app-sidebar-brand",
-        "LAGRANGE BASEBALL"
-      )
+      uiOutput("sidebar_branding")
     ),
     
     tags$a(
@@ -3139,6 +3133,29 @@ ui <- fluidPage(
                       "the player's identity or historical data from earlier seasons.")
               ),
               div(class="admin-card",
+                  div(class="admin-title","Organization Onboarding"),
+                  div(class="admin-note",
+                      "Platform-owner workflow: upload the completed onboarding workbook, review the preview, ",
+                      "then import the organization, coaches, season/periods, roster, roster memberships, and access record. ",
+                      "Existing organizations are preserved."),
+                  fileInput(
+                    "org_import_file",
+                    "Completed Organization Onboarding Workbook (.xlsx)",
+                    accept=c(".xlsx")
+                  ),
+                  checkboxInput(
+                    "org_import_confirm",
+                    "I reviewed the workbook and want to import/update this organization.",
+                    value=FALSE
+                  ),
+                  div(class="admin-toolbar",
+                      actionButton("org_import_preview","PREVIEW IMPORT"),
+                      actionButton("org_import_execute","IMPORT ORGANIZATION")
+                  ),
+                  uiOutput("org_import_status"),
+                  uiOutput("org_import_preview_ui")
+              ),
+              div(class="admin-card",
                   div(class="admin-title","Backend Maintenance"),
                   div(class="admin-note",
                       "Maintenance is manual in V59 so normal startup stays fast. ",
@@ -3180,6 +3197,13 @@ ui <- fluidPage(
     
   )
 )
+
+# ==================================================
+# V60 — ORGANIZATION ONBOARDING / MULTI-TEAM IMPORT
+# Built directly on stable V59.
+# Adds workbook-driven client onboarding and dynamic organization branding.
+# Normal practice startup remains read-only.
+# ==================================================
 
 # ==================================================
 # V59 — FAST STARTUP / READ-ONLY BOOT
@@ -3412,6 +3436,9 @@ server <- function(input, output, session) {
   periods_directory <- reactiveVal(data.frame())
   subscriptions_directory <- reactiveVal(data.frame())
   roster_memberships_directory <- reactiveVal(data.frame())
+  organizations_directory <- reactiveVal(data.frame())
+  org_import_preview_data <- reactiveVal(NULL)
+  org_import_message <- reactiveVal(NULL)
   roster_manage_message <- reactiveVal(NULL)
   sessions_admin_sessions <- reactiveVal(data.frame())
   sessions_admin_pitches <- reactiveVal(data.frame())
@@ -3502,6 +3529,470 @@ server <- function(input, output, session) {
     googlesheets4::sheet_append(ss=SHEET_URL,data=one_row_df(values),sheet=sheet_name)
     invisible(TRUE)
   }
+  v60_chr <- function(x,default=""){
+    if(is.null(x)||length(x)==0)return(default)
+    x<-as.character(x[1])
+    if(is.na(x)||!nzchar(trimws(x)))default else trimws(x)
+  }
+  
+  v60_slug <- function(x){
+    x<-toupper(trimws(as.character(x)))
+    x<-gsub("[^A-Z0-9]+","_",x)
+    x<-gsub("^_+|_+$","",x)
+    if(!nzchar(x))"ORG"else x
+  }
+  
+  v60_dark_color <- function(hex){
+    hex<-toupper(trimws(as.character(hex)))
+    if(!grepl("^#[0-9A-F]{6}$",hex))return("#7A0000")
+    rgbv<-grDevices::col2rgb(hex)
+    rgbv<-pmax(0,round(rgbv*.72))
+    grDevices::rgb(rgbv[1],rgbv[2],rgbv[3],maxColorValue=255)
+  }
+  
+  ensure_organizations_sheet <- function(){
+    existing<-googlesheets4::sheet_names(SHEET_URL)
+    if(!"Organizations"%in%existing){
+      googlesheets4::sheet_add(SHEET_URL,"Organizations")
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=data.frame(
+          Organization_ID="Organization_ID",
+          Organization_Name="Organization_Name",
+          Short_Name="Short_Name",
+          Primary_Color="Primary_Color",
+          Secondary_Color="Secondary_Color",
+          Accent_Color="Accent_Color",
+          Logo_URL="Logo_URL",
+          App_Title="App_Title",
+          Active="Active",
+          stringsAsFactors=FALSE
+        ),
+        sheet="Organizations",
+        range="A1:I1",
+        col_names=FALSE
+      )
+    }
+    TRUE
+  }
+  
+  load_organizations <- function(){
+    tryCatch({
+      d<-as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,
+          sheet="Organizations",
+          range="A1:I101",
+          col_names=TRUE
+        ),
+        stringsAsFactors=FALSE
+      )
+      d<-v49_normalize_sheet_data(d,"generic")
+      if(nrow(d)>0&&"Organization_ID"%in%names(d)){
+        ids<-trimws(as.character(d$Organization_ID))
+        d<-d[!is.na(ids)&ids!="",,drop=FALSE]
+      }
+      organizations_directory(d)
+      TRUE
+    },error=function(e){
+      organizations_directory(data.frame())
+      FALSE
+    })
+  }
+  
+  current_organization_row <- reactive({
+    org<-current_org_id()
+    d<-organizations_directory()
+    if(!is.null(d)&&nrow(d)>0&&"Organization_ID"%in%names(d)){
+      hit<-d[trimws(as.character(d$Organization_ID))==org,,drop=FALSE]
+      if(nrow(hit)>0)return(hit[1,,drop=FALSE])
+    }
+    
+    data.frame(
+      Organization_ID=org,
+      Organization_Name=setting_chr("Organization_Name","LaGrange College"),
+      Short_Name=if(org=="LAGRANGE")"LAGRANGE BASEBALL"else org,
+      Primary_Color="#8E0000",
+      Secondary_Color="#A80000",
+      Accent_Color="#D20B0B",
+      Logo_URL=if(org=="LAGRANGE")"lagrange_logo.png"else"",
+      App_Title=paste0(setting_chr("Organization_Name","LaGrange College")," Swing Decision Platform"),
+      Active="TRUE",
+      stringsAsFactors=FALSE
+    )
+  })
+  
+  output$org_theme_css<-renderUI({
+    o<-current_organization_row()
+    primary<-v60_chr(o$Primary_Color,"#8E0000")
+    secondary<-v60_chr(o$Secondary_Color,primary)
+    accent<-v60_chr(o$Accent_Color,"#D20B0B")
+    dark<-v60_dark_color(primary)
+    tags$style(HTML(paste0(
+      ":root{",
+      "--org-primary:",primary,";",
+      "--org-primary-dark:",dark,";",
+      "--org-secondary:",secondary,";",
+      "--org-accent:",accent,";",
+      "}"
+    )))
+  })
+  
+  output$sidebar_branding<-renderUI({
+    o<-current_organization_row()
+    logo<-v60_chr(o$Logo_URL,if(current_org_id()=="LAGRANGE")"lagrange_logo.png"else"")
+    brand<-v60_chr(o$Short_Name,v60_chr(o$Organization_Name,current_org_id()))
+    
+    tagList(
+      if(nzchar(logo))tags$img(
+        class="app-sidebar-logo",
+        src=logo,
+        onerror="this.style.display='none';"
+      ),
+      div(class="app-sidebar-brand",brand)
+    )
+  })
+  
+  v60_read_sheet <- function(path,sheet_name){
+    as.data.frame(
+      readxl::read_excel(path,sheet=sheet_name,.name_repair="minimal"),
+      stringsAsFactors=FALSE
+    )
+  }
+  
+  v60_clean_import_df <- function(d){
+    d<-as.data.frame(d,stringsAsFactors=FALSE)
+    names(d)<-trimws(as.character(names(d)))
+    d
+  }
+  
+  v60_required_columns <- function(d,required,sheet_name){
+    missing<-setdiff(required,names(d))
+    if(length(missing)>0){
+      stop(
+        paste0(
+          sheet_name," is missing required column(s): ",
+          paste(missing,collapse=", ")
+        )
+      )
+    }
+    TRUE
+  }
+  
+  v60_parse_onboarding_workbook <- function(path){
+    sheets<-readxl::excel_sheets(path)
+    required_sheets<-c("Organization","Coaches","Roster")
+    missing_sheets<-setdiff(required_sheets,sheets)
+    if(length(missing_sheets)>0){
+      stop(paste0("Workbook is missing sheet(s): ",paste(missing_sheets,collapse=", ")))
+    }
+    
+    org<-v60_clean_import_df(v60_read_sheet(path,"Organization"))
+    coaches<-v60_clean_import_df(v60_read_sheet(path,"Coaches"))
+    roster<-v60_clean_import_df(v60_read_sheet(path,"Roster"))
+    
+    v60_required_columns(
+      org,
+      c(
+        "Organization_ID","Organization_Name","Short_Name","Primary_Color",
+        "Secondary_Color","Accent_Color","Logo_URL","App_Title","Baseball_Year",
+        "Fall_Start","Fall_End","Spring_Start","Spring_End","Access_Status"
+      ),
+      "Organization"
+    )
+    v60_required_columns(
+      coaches,
+      c("Display_Name","Email","Role","Active"),
+      "Coaches"
+    )
+    v60_required_columns(
+      roster,
+      c(
+        "Existing_Player_ID","First_Name","Last_Name","Jersey_Number","Bats",
+        "Throws","Primary_Position","Player_Type","Class","Active"
+      ),
+      "Roster"
+    )
+    
+    # Require exactly one populated organization row.
+    if(nrow(org)==0)stop("Organization sheet has no data row.")
+    org<-org[1,,drop=FALSE]
+    
+    org_id<-v60_slug(v60_chr(org$Organization_ID,v60_chr(org$Organization_Name,"")))
+    org_name<-v60_chr(org$Organization_Name,"")
+    if(!nzchar(org_name))stop("Organization_Name is required.")
+    
+    year_name<-v60_chr(org$Baseball_Year,"")
+    if(!grepl("^20[0-9]{2}-[0-9]{2}$",year_name)){
+      stop("Baseball_Year must look like 2026-27.")
+    }
+    
+    list(
+      organization=org,
+      coaches=coaches,
+      roster=roster,
+      organization_id=org_id,
+      baseball_year=year_name
+    )
+  }
+  
+  v60_read_or_empty <- function(sheet_name,range,headers){
+    tryCatch({
+      d<-as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,sheet=sheet_name,range=range,col_names=TRUE
+        ),
+        stringsAsFactors=FALSE
+      )
+      for(nm in setdiff(headers,names(d)))d[[nm]]<-""
+      d[,headers,drop=FALSE]
+    },error=function(e){
+      as.data.frame(
+        setNames(replicate(length(headers),character(0),simplify=FALSE),headers),
+        stringsAsFactors=FALSE
+      )
+    })
+  }
+  
+  v60_rewrite_sheet <- function(sheet_name,range_clear_to,headers,data){
+    for(nm in setdiff(headers,names(data)))data[[nm]]<-""
+    data<-data[,headers,drop=FALSE]
+    googlesheets4::range_clear(
+      ss=SHEET_URL,
+      range=paste0("'",sheet_name,"'!A2:",range_clear_to)
+    )
+    if(nrow(data)>0){
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=data,
+        sheet=sheet_name,
+        range="A2",
+        col_names=FALSE
+      )
+    }
+    TRUE
+  }
+  
+  v60_upsert_row <- function(existing,row,key_cols){
+    if(nrow(existing)==0)return(row)
+    hit<-rep(TRUE,nrow(existing))
+    for(k in key_cols){
+      hit<-hit & trimws(as.character(existing[[k]]))==trimws(as.character(row[[k]][1]))
+    }
+    if(any(hit,na.rm=TRUE)){
+      existing[which(hit)[1],names(row)]<-row[1,names(row)]
+      existing
+    }else{
+      rbind(existing,row)
+    }
+  }
+  
+  ensure_v60_onboarding_backend <- function(){
+    ensure_organizations_sheet()
+    ensure_users_sheet()
+    ensure_season_architecture_sheets()
+    TRUE
+  }
+  
+  v60_import_organization <- function(parsed){
+    org_id<-parsed$organization_id
+    year_name<-parsed$baseball_year
+    org<-parsed$organization
+    coaches<-parsed$coaches
+    roster<-parsed$roster
+    
+    ensure_v60_onboarding_backend()
+    
+    year_start<-as.integer(substr(year_name,1,4))
+    year_end_two<-substr(year_name,6,7)
+    season_id<-paste0(org_id,"_",year_start,"_",year_end_two)
+    fall_id<-paste0(org_id,"_FALL_",year_start)
+    spring_year<-year_start+1
+    spring_id<-paste0(org_id,"_SPRING_",spring_year)
+    
+    # Organizations
+    org_headers<-c(
+      "Organization_ID","Organization_Name","Short_Name","Primary_Color",
+      "Secondary_Color","Accent_Color","Logo_URL","App_Title","Active"
+    )
+    org_existing<-v60_read_or_empty("Organizations","A1:I1001",org_headers)
+    org_row<-data.frame(
+      Organization_ID=org_id,
+      Organization_Name=v60_chr(org$Organization_Name),
+      Short_Name=v60_chr(org$Short_Name,v60_chr(org$Organization_Name)),
+      Primary_Color=v60_chr(org$Primary_Color,"#8E0000"),
+      Secondary_Color=v60_chr(org$Secondary_Color,v60_chr(org$Primary_Color,"#8E0000")),
+      Accent_Color=v60_chr(org$Accent_Color,v60_chr(org$Primary_Color,"#8E0000")),
+      Logo_URL=v60_chr(org$Logo_URL,""),
+      App_Title=v60_chr(org$App_Title,paste0(v60_chr(org$Organization_Name)," Baseball Platform")),
+      Active="TRUE",
+      stringsAsFactors=FALSE
+    )
+    org_existing<-v60_upsert_row(org_existing,org_row,c("Organization_ID"))
+    v60_rewrite_sheet("Organizations","I1001",org_headers,org_existing)
+    
+    # Users / coaches
+    user_headers<-c("User_ID","Organization_ID","Display_Name","Email","Role","Active")
+    users<-v60_read_or_empty("Users","A1:F1001",user_headers)
+    if(nrow(coaches)>0){
+      for(i in seq_len(nrow(coaches))){
+        nm<-v60_chr(coaches$Display_Name[i],"")
+        if(!nzchar(nm))next
+        email<-tolower(v60_chr(coaches$Email[i],""))
+        role<-v60_chr(coaches$Role[i],"Coach")
+        active<-toupper(v60_chr(coaches$Active[i],"TRUE"))
+        
+        existing_id<-""
+        if(nrow(users)>0&&nzchar(email)&&"Email"%in%names(users)){
+          ehit<-tolower(trimws(as.character(users$Email)))==email &
+            trimws(as.character(users$Organization_ID))==org_id
+          if(any(ehit,na.rm=TRUE))existing_id<-v60_chr(users$User_ID[which(ehit)[1]],"")
+        }
+        uid<-if(nzchar(existing_id))existing_id else paste0(org_id,"_USER_",v60_slug(nm))
+        
+        urow<-data.frame(
+          User_ID=uid,Organization_ID=org_id,Display_Name=nm,Email=email,
+          Role=role,Active=if(active%in%c("FALSE","F","0","NO","N"))"FALSE"else"TRUE",
+          stringsAsFactors=FALSE
+        )
+        users<-v60_upsert_row(users,urow,c("User_ID"))
+      }
+    }
+    v60_rewrite_sheet("Users","F1001",user_headers,users)
+    
+    # Seasons
+    season_headers<-c("Season_ID","Organization_ID","Season_Name","Start_Date","End_Date","Active")
+    seasons<-v60_read_or_empty("Seasons","A1:F1001",season_headers)
+    srow<-data.frame(
+      Season_ID=season_id,Organization_ID=org_id,Season_Name=year_name,
+      Start_Date=v60_chr(org$Fall_Start,paste0(year_start,"-08-01")),
+      End_Date=v60_chr(org$Spring_End,paste0(spring_year,"-06-30")),
+      Active="TRUE",stringsAsFactors=FALSE
+    )
+    seasons<-v60_upsert_row(seasons,srow,c("Season_ID"))
+    v60_rewrite_sheet("Seasons","F1001",season_headers,seasons)
+    
+    # Periods
+    period_headers<-c(
+      "Period_ID","Organization_ID","Season_ID","Period_Name","Period_Type",
+      "Start_Date","End_Date","Counts_Toward_Official_Stats","Active"
+    )
+    periods<-v60_read_or_empty("Periods","A1:I1001",period_headers)
+    fall_row<-data.frame(
+      Period_ID=fall_id,Organization_ID=org_id,Season_ID=season_id,
+      Period_Name=paste0("Fall ",year_start),Period_Type="Fall",
+      Start_Date=v60_chr(org$Fall_Start,paste0(year_start,"-08-01")),
+      End_Date=v60_chr(org$Fall_End,paste0(year_start,"-12-31")),
+      Counts_Toward_Official_Stats="FALSE",Active="TRUE",stringsAsFactors=FALSE
+    )
+    spring_row<-data.frame(
+      Period_ID=spring_id,Organization_ID=org_id,Season_ID=season_id,
+      Period_Name=paste0("Spring ",spring_year),Period_Type="Spring",
+      Start_Date=v60_chr(org$Spring_Start,paste0(spring_year,"-01-01")),
+      End_Date=v60_chr(org$Spring_End,paste0(spring_year,"-06-30")),
+      Counts_Toward_Official_Stats="TRUE",Active="TRUE",stringsAsFactors=FALSE
+    )
+    periods<-v60_upsert_row(periods,fall_row,c("Period_ID"))
+    periods<-v60_upsert_row(periods,spring_row,c("Period_ID"))
+    v60_rewrite_sheet("Periods","I1001",period_headers,periods)
+    
+    # Subscription/access
+    sub_headers<-c(
+      "Subscription_ID","Organization_ID","Season_ID","Access_Status",
+      "Start_Date","End_Date","Notes"
+    )
+    subs<-v60_read_or_empty("Subscriptions","A1:G1001",sub_headers)
+    subrow<-data.frame(
+      Subscription_ID=paste0(org_id,"_SUB_",year_start,"_",year_end_two),
+      Organization_ID=org_id,Season_ID=season_id,
+      Access_Status=v60_chr(org$Access_Status,"Trial"),
+      Start_Date=v60_chr(org$Fall_Start,paste0(year_start,"-08-01")),
+      End_Date=v60_chr(org$Spring_End,paste0(spring_year,"-06-30")),
+      Notes="Created from organization onboarding workbook.",
+      stringsAsFactors=FALSE
+    )
+    subs<-v60_upsert_row(subs,subrow,c("Subscription_ID"))
+    v60_rewrite_sheet("Subscriptions","G1001",sub_headers,subs)
+    
+    # Players
+    player_headers<-c(
+      "Player_ID","Organization_ID","First_Name","Last_Name","Display_Name",
+      "Jersey_Number","Bats","Throws","Primary_Position","Player_Type","Class","Active"
+    )
+    players<-v60_read_or_empty("Players","A1:L5001",player_headers)
+    imported_player_ids<-character(0)
+    
+    if(nrow(roster)>0){
+      for(i in seq_len(nrow(roster))){
+        fn<-v60_chr(roster$First_Name[i],"")
+        ln<-v60_chr(roster$Last_Name[i],"")
+        if(!nzchar(fn)&&!nzchar(ln))next
+        display<-trimws(paste(fn,ln))
+        existing_pid<-v60_chr(roster$Existing_Player_ID[i],"")
+        
+        if(!nzchar(existing_pid)&&nrow(players)>0){
+          same<-trimws(as.character(players$Organization_ID))==org_id &
+            tolower(trimws(as.character(players$Display_Name)))==tolower(display)
+          if(any(same,na.rm=TRUE))existing_pid<-v60_chr(players$Player_ID[which(same)[1]],"")
+        }
+        
+        pid<-if(nzchar(existing_pid))existing_pid else paste0(org_id,"_PLAYER_",v60_slug(display))
+        imported_player_ids<-c(imported_player_ids,pid)
+        
+        prow<-data.frame(
+          Player_ID=pid,Organization_ID=org_id,First_Name=fn,Last_Name=ln,
+          Display_Name=display,Jersey_Number=v60_chr(roster$Jersey_Number[i],""),
+          Bats=toupper(v60_chr(roster$Bats[i],"R")),
+          Throws=toupper(v60_chr(roster$Throws[i],"R")),
+          Primary_Position=v60_chr(roster$Primary_Position[i],""),
+          Player_Type=v60_chr(roster$Player_Type[i],"Hitter"),
+          Class=v60_chr(roster$Class[i],""),
+          Active=if(toupper(v60_chr(roster$Active[i],"TRUE"))%in%c("FALSE","F","0","NO","N"))"FALSE"else"TRUE",
+          stringsAsFactors=FALSE
+        )
+        players<-v60_upsert_row(players,prow,c("Player_ID"))
+      }
+    }
+    v60_rewrite_sheet("Players","L5001",player_headers,players)
+    
+    # Roster memberships: imported workbook defines active roster for this season.
+    rm_headers<-c(
+      "Roster_Membership_ID","Organization_ID","Season_ID","Player_ID",
+      "Status","Class_Year","Jersey_Number","Primary_Position"
+    )
+    rms<-v60_read_or_empty("Roster_Memberships","A1:H5001",rm_headers)
+    
+    if(nrow(rms)>0){
+      target<-trimws(as.character(rms$Organization_ID))==org_id &
+        trimws(as.character(rms$Season_ID))==season_id
+      rms$Status[target]<-"Inactive"
+    }
+    
+    if(length(imported_player_ids)>0){
+      for(pid in unique(imported_player_ids)){
+        pr<-players[as.character(players$Player_ID)==pid,,drop=FALSE]
+        rrow<-data.frame(
+          Roster_Membership_ID=paste0(org_id,"_ROSTER_",season_id,"_",v60_slug(pid)),
+          Organization_ID=org_id,Season_ID=season_id,Player_ID=pid,Status="Active",
+          Class_Year=if(nrow(pr)>0)v60_chr(pr$Class,"")else"",
+          Jersey_Number=if(nrow(pr)>0)v60_chr(pr$Jersey_Number,"")else"",
+          Primary_Position=if(nrow(pr)>0)v60_chr(pr$Primary_Position,"")else"",
+          stringsAsFactors=FALSE
+        )
+        rms<-v60_upsert_row(rms,rrow,c("Roster_Membership_ID"))
+      }
+    }
+    v60_rewrite_sheet("Roster_Memberships","H5001",rm_headers,rms)
+    
+    list(
+      organization_id=org_id,
+      organization_name=v60_chr(org$Organization_Name),
+      season_id=season_id,
+      coaches=sum(trimws(as.character(coaches$Display_Name))!="",na.rm=TRUE),
+      players=length(unique(imported_player_ids))
+    )
+  }
+  
   ensure_season_architecture_sheets <- function(){
     tryCatch({
       existing <- googlesheets4::sheet_names(SHEET_URL)
@@ -4258,6 +4749,20 @@ server <- function(input, output, session) {
     
     # Deliberate org/user switch: refresh once.
     load_season_architecture()
+    
+    tryCatch({
+      players_data<-gs_read_players(sheet_url=SHEET_URL)
+      players_data<-as.data.frame(players_data,stringsAsFactors=FALSE)
+      if(nrow(players_data)>0&&"Organization_ID"%in%names(players_data)){
+        players_data<-players_data[
+          trimws(as.character(players_data$Organization_ID))==current_org_id(),
+          ,
+          drop=FALSE
+        ]
+      }
+      player_lookup(players_data)
+    },error=function(e){})
+    
     refresh_sessions_admin_data()
     load_sessions()
     load_report_pitches()
@@ -4937,6 +5442,103 @@ server <- function(input, output, session) {
       
     },error=function(e){
       roster_manage_message(paste0("Roster save error: ",e$message))
+    })
+  })
+  
+  output$org_import_status<-renderUI({
+    msg<-org_import_message()
+    if(is.null(msg)||!nzchar(msg))return(NULL)
+    div(
+      class=if(grepl("error|missing|required|invalid",tolower(msg)))"warning-text"else"success-text",
+      msg
+    )
+  })
+  
+  output$org_import_preview_ui<-renderUI({
+    x<-org_import_preview_data()
+    if(is.null(x))return(NULL)
+    
+    org<-x$organization
+    coaches<-x$coaches
+    roster<-x$roster
+    
+    div(
+      class="multi-user-ready",
+      HTML(paste0(
+        "<strong>Organization:</strong> ",v60_chr(org$Organization_Name)," (",x$organization_id,")<br>",
+        "<strong>Baseball year:</strong> ",x$baseball_year,"<br>",
+        "<strong>Coaches:</strong> ",sum(trimws(as.character(coaches$Display_Name))!="",na.rm=TRUE),"<br>",
+        "<strong>Roster rows:</strong> ",sum(
+          trimws(as.character(roster$First_Name))!=""|trimws(as.character(roster$Last_Name))!="",
+          na.rm=TRUE
+        ),"<br>",
+        "<strong>Primary color:</strong> ",v60_chr(org$Primary_Color,"—"),"<br>",
+        "<strong>Logo:</strong> ",ifelse(nzchar(v60_chr(org$Logo_URL,"")),v60_chr(org$Logo_URL),"No logo URL supplied")
+      ))
+    )
+  })
+  
+  observeEvent(input$org_import_preview,{
+    if(current_user_role()!="Admin"){
+      org_import_message("Import error: Admin role is required.")
+      return()
+    }
+    if(is.null(input$org_import_file)){
+      org_import_message("Import error: choose an .xlsx onboarding workbook first.")
+      return()
+    }
+    
+    tryCatch({
+      parsed<-v60_parse_onboarding_workbook(input$org_import_file$datapath)
+      org_import_preview_data(parsed)
+      org_import_message(
+        paste0(
+          "Preview ready for ",
+          v60_chr(parsed$organization$Organization_Name),
+          ". Review the summary, then confirm and import."
+        )
+      )
+    },error=function(e){
+      org_import_preview_data(NULL)
+      org_import_message(paste0("Import preview error: ",e$message))
+    })
+  })
+  
+  observeEvent(input$org_import_execute,{
+    if(current_user_role()!="Admin"){
+      org_import_message("Import error: Admin role is required.")
+      return()
+    }
+    if(!isTRUE(input$org_import_confirm)){
+      org_import_message("Import error: check the confirmation box before importing.")
+      return()
+    }
+    
+    parsed<-org_import_preview_data()
+    if(is.null(parsed)){
+      org_import_message("Import error: preview the workbook first.")
+      return()
+    }
+    
+    tryCatch({
+      result<-v60_import_organization(parsed)
+      
+      # Refresh the small identity/config caches. Do NOT switch the current
+      # LaGrange user automatically; practice use stays uninterrupted.
+      load_organizations()
+      load_user_directory()
+      
+      org_import_message(
+        paste0(
+          "Imported ",result$organization_name," successfully: ",
+          result$coaches," coach(es), ",
+          result$players," player(s), season ",
+          result$season_id,
+          ". LaGrange remains the active organization until you deliberately switch users."
+        )
+      )
+    },error=function(e){
+      org_import_message(paste0("Import error: ",e$message))
     })
   })
   
@@ -14450,6 +15052,7 @@ server <- function(input, output, session) {
     # backfill occur here.
     
     load_app_settings(update_ui=TRUE)
+    load_organizations()
     load_user_directory()
     load_season_architecture()
     
