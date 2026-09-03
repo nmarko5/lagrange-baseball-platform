@@ -1388,12 +1388,7 @@
         "Repository": "CRAN",
         "Date/Publication": "2026-05-16 21:50:23 UTC",
         "Built": "R 4.6.0; aarch64-apple-darwin23; 2026-05-17 02:16:09 UTC; unix",
-        "Archs": "readxl.so.dSYM",
-        "RemoteType": "standard",
-        "RemotePkgRef": "readxl",
-        "RemoteRef": "readxl",
-        "RemoteRepos": "https://cran.rstudio.com",
-        "RemoteSha.Version": "1.5.0"
+        "Archs": "readxl.so.dSYM"
       }
     },
     "rematch": {
