@@ -2778,14 +2778,16 @@ ui <- fluidPage(
             uiOutput("pitcher_bullpen_kpis")
           ),
           
+          uiOutput("pitcher_bullpen_execution_breakdown"),
+          
           div(
             class="bullpen-visual-grid",
             
             div(
               class="bullpen-visual-card",
-              div(class="bullpen-visual-title","Target vs Actual"),
-              div(class="bullpen-visual-note","Catcher target → actual pitch location. Each line shows the direction and size of the miss."),
-              div(class="bullpen-plot-wrap",plotOutput("pitcher_bullpen_target_actual_plot",height="390px"))
+              div(class="bullpen-visual-title","Pitch Location by Pitch Type"),
+              div(class="bullpen-visual-note","Actual pitch locations separated by pitch type. Each panel shows where that pitch is living, plus Strike %, Zone %, and Competitive %."),
+              div(class="bullpen-plot-wrap",plotOutput("pitcher_bullpen_target_actual_plot",height="430px"))
             ),
             
             div(
@@ -2821,11 +2823,11 @@ ui <- fluidPage(
             class="bullpen-visual-card",
             style="margin-bottom:10px;",
             div(class="bullpen-visual-title","Bullpen Progress Over Time"),
-            div(class="bullpen-visual-note","Session-by-session development. Command Grade and Target Execution should trend up; Avg Miss Distance should trend down."),
+            div(class="bullpen-visual-note","Session-by-session development. Command Grade and Competitive % should trend up; Avg Miss Distance should trend down."),
             div(
               class="bullpen-trend-grid",
               div(class="bullpen-trend-card",div(class="bullpen-trend-label","Command Grade"),plotOutput("pitcher_bullpen_command_trend",height="190px")),
-              div(class="bullpen-trend-card",div(class="bullpen-trend-label","Target Execution %"),plotOutput("pitcher_bullpen_target_trend",height="190px")),
+              div(class="bullpen-trend-card",div(class="bullpen-trend-label","Competitive %"),plotOutput("pitcher_bullpen_target_trend",height="190px")),
               div(class="bullpen-trend-card",div(class="bullpen-trend-label","Avg Miss Distance"),plotOutput("pitcher_bullpen_miss_trend",height="190px")),
               div(class="bullpen-trend-card",div(class="bullpen-trend-label","Strike %"),plotOutput("pitcher_bullpen_strike_trend",height="190px"))
             )
@@ -3173,17 +3175,17 @@ ui <- fluidPage(
           div(class="admin-card",
               div(class="admin-title","Bullpen Command Configuration"),
               div(class="admin-grid-2",
-                  numericInput("setting_target_execution","Target Execution Radius (inches)",value=13,min=1,max=36,step=.5),
+                  numericInput("setting_target_execution","Executed Boundary (inches)",value=12,min=6,max=24,step=.5),
                   numericInput("setting_mlb_reference","MLB Avg Miss Reference (inches)",value=12,min=1,max=36,step=.5)
               ),
               div(class="admin-note","At the default 12-inch reference, 12 inches = a 70 Miss Distance Score."),
               hr(),
               div(class="admin-title","Bullpen Command Grade Weights"),
               div(class="settings-weight-grid",
-                  numericInput("setting_weight_target","Target Execution",value=.50,min=0,max=1,step=.05),
+                  numericInput("setting_weight_target","Execution Quality",value=.35,min=0,max=1,step=.05),
                   numericInput("setting_weight_miss","Avg Miss Distance",value=.25,min=0,max=1,step=.05),
-                  numericInput("setting_weight_zone","Zone %",value=.15,min=0,max=1,step=.05),
-                  numericInput("setting_weight_strike","Strike %",value=.10,min=0,max=1,step=.05)
+                  numericInput("setting_weight_zone","Zone %",value=.20,min=0,max=1,step=.05),
+                  numericInput("setting_weight_strike","Strike %",value=.20,min=0,max=1,step=.05)
               ),
               uiOutput("settings_weight_check")
           ),
@@ -3197,6 +3199,12 @@ ui <- fluidPage(
     
   )
 )
+
+# ==================================================
+# V61 — BULLPEN REPORT CLEANUP / COMMAND 2.0
+# Built directly on V60.
+# Replaces Target-vs-Actual with pitch-type heatmaps and adds execution bands.
+# ==================================================
 
 # ==================================================
 # V60 — ORGANIZATION ONBOARDING / MULTI-TEAM IMPORT
@@ -7683,7 +7691,7 @@ server <- function(input, output, session) {
     miss_score<-bullpen_miss_distance_score(avg_miss)
     
     # Bullpen Command Grade:
-    # 50% Target Execution % (within 13 inches)
+    # 50% Competitive % (within 13 inches)
     # 25% Avg Miss Distance Score
     # 15% Zone %
     # 10% Strike %
@@ -7709,12 +7717,12 @@ server <- function(input, output, session) {
   output$pitcher_bullpen_relative_note<-renderUI({
     HTML(paste0("Every catcher target is recentered to 0,0. Positive horizontal = arm-side; negative = glove-side. The ",
                 sprintf("%.1f",setting_num("Bullpen_Target_Execution_In",13)),
-                "-inch circle is the Target Execution boundary."))
+                "-inch circle is the Competitive boundary."))
   })
   output$pitcher_bullpen_direction_note<-renderUI({
     HTML(paste0("Direction of pitches that finish outside the ",
                 sprintf("%.1f",setting_num("Bullpen_Target_Execution_In",13)),
-                "-inch Target Execution radius. Arm/glove side is adjusted for pitcher handedness."))
+                "-inch Competitive radius. Arm/glove side is adjusted for pitcher handedness."))
   })
   
   output$pitcher_bullpen_explainer<-renderUI({
@@ -7724,9 +7732,9 @@ server <- function(input, output, session) {
          setting_num("Bullpen_Weight_Zone",.15),setting_num("Bullpen_Weight_Strike",.10))
     if(any(!is.finite(w))||sum(w)<=0)w<-c(.50,.25,.15,.10)
     w<-100*w/sum(w)
-    HTML(paste0("<strong>Bullpen Command Grade:</strong> ",sprintf("%.0f",w[1]),"% Target Execution + ",
+    HTML(paste0("<strong>Bullpen Command Grade:</strong> ",sprintf("%.0f",w[1]),"% Competitive + ",
                 sprintf("%.0f",w[2]),"% Avg Miss Distance + ",sprintf("%.0f",w[3]),"% Zone % + ",
-                sprintf("%.0f",w[4]),"% Strike %. <strong>Target Execution</strong> = pitches within ",
+                sprintf("%.0f",w[4]),"% Strike %. <strong>Competitive</strong> = pitches within ",
                 sprintf("%.1f",radius)," inches of the catcher target. <strong>Avg Miss Distance</strong> uses ",
                 sprintf("%.1f",ref)," inches as the MLB-average reference (70 Miss Score). ",
                 "Miss Direction only classifies pitches outside the execution radius. Bullpen data remains separate from live/game results."))
@@ -7776,7 +7784,7 @@ server <- function(input, output, session) {
           card("Bullpen Command Grade","N/A"),
           card("Strike %","N/A"),
           card("Zone %","N/A"),
-          card("Target Execution %","N/A"),
+          card("Competitive %","N/A"),
           card("Avg Miss Distance","N/A")
         )
       )
@@ -7795,7 +7803,7 @@ server <- function(input, output, session) {
       card("Bullpen Command Grade",grade),
       card("Strike %",p_pct(x$strike)),
       card("Zone %",p_pct(x$zone)),
-      card("Target Execution %",p_pct(x$target_hit)),
+      card("Competitive %",p_pct(x$target_hit)),
       card("Avg Miss Distance",miss)
     )
   })
@@ -7914,7 +7922,7 @@ server <- function(input, output, session) {
     box(col="#bbbbbb")
     abline(h=0,v=0,col="#777777",lty=3)
     
-    # Target Execution radius.
+    # Competitive radius.
     target_radius<-setting_num("Bullpen_Target_Execution_In",13)
     th<-seq(0,2*pi,length.out=240)
     lines(target_radius*cos(th),target_radius*sin(th),lwd=2,col="#222222")
@@ -8064,7 +8072,7 @@ server <- function(input, output, session) {
   },bg="white")
   
   output$pitcher_bullpen_target_trend<-renderPlot({
-    bullpen_trend_plot("Target","Target Execution %",pct=TRUE)
+    bullpen_trend_plot("Target","Competitive %",pct=TRUE)
   },bg="white")
   
   output$pitcher_bullpen_miss_trend<-renderPlot({
@@ -8146,7 +8154,7 @@ server <- function(input, output, session) {
           dg,TRUE,"",1
         ),
         compare_card(
-          "Target Execution %",
+          "Competitive %",
           p_pct(sb$target_hit),
           dt,TRUE," pts",1
         ),
@@ -8174,7 +8182,7 @@ server <- function(input, output, session) {
         tags$tbody(
           tags$tr(tags$td("Pitches"),tags$td(sa$pitches),tags$td(sb$pitches),tags$td(sb$pitches-sa$pitches)),
           tags$tr(tags$td("Command Grade"),tags$td(sprintf("%.1f",sa$command_grade)),tags$td(sprintf("%.1f",sb$command_grade)),tags$td(delta_fmt(dg))),
-          tags$tr(tags$td("Target Execution %"),tags$td(p_pct(sa$target_hit)),tags$td(p_pct(sb$target_hit)),tags$td(delta_fmt(dt," pts"))),
+          tags$tr(tags$td("Competitive %"),tags$td(p_pct(sa$target_hit)),tags$td(p_pct(sb$target_hit)),tags$td(delta_fmt(dt," pts"))),
           tags$tr(tags$td("Avg Miss Distance"),tags$td(paste0(sprintf("%.1f",sa$avg_miss)," in")),tags$td(paste0(sprintf("%.1f",sb$avg_miss)," in")),tags$td(delta_fmt(dm," in"))),
           tags$tr(tags$td("Miss Distance Score"),tags$td(sprintf("%.1f",sa$miss_score)),tags$td(sprintf("%.1f",sb$miss_score)),tags$td(delta_fmt(sb$miss_score-sa$miss_score))),
           tags$tr(tags$td("Zone %"),tags$td(p_pct(sa$zone)),tags$td(p_pct(sb$zone)),tags$td(delta_fmt(100*(sb$zone-sa$zone)," pts"))),
@@ -8235,7 +8243,7 @@ server <- function(input, output, session) {
           tags$th("Pitches"),
           tags$th("Strike %"),
           tags$th("Zone %"),
-          tags$th("Target Execution %"),
+          tags$th("Competitive %"),
           tags$th("Avg Miss"),
           tags$th("Miss Score")
         )
@@ -8344,7 +8352,7 @@ server <- function(input, output, session) {
           tags$th("Command Grade"),
           tags$th("Strike %"),
           tags$th("Zone %"),
-          tags$th("Target Execution %"),
+          tags$th("Competitive %"),
           tags$th("Avg Miss"),
           tags$th("Miss Score")
         )
@@ -15039,6 +15047,356 @@ server <- function(input, output, session) {
       
     }
   )
+  
+  
+  # ==================================================
+  # V61 — BULLPEN COMMAND 2.0 OVERRIDES
+  # ==================================================
+  
+  bullpen_execution_boundaries <- function(){
+    # Fixed baseball-friendly bands for this version.
+    c(dot=6, executed=12, competitive=18, poor=24)
+  }
+  
+  bullpen_execution_band <- function(miss_inches){
+    x<-suppressWarnings(as.numeric(miss_inches))
+    if(!is.finite(x))return(NA_character_)
+    b<-bullpen_execution_boundaries()
+    if(x<=b["dot"])return("Dot")
+    if(x<=b["executed"])return("Executed")
+    if(x<=b["competitive"])return("Competitive")
+    if(x<=b["poor"])return("Poor")
+    "Noncompetitive"
+  }
+  
+  bullpen_execution_quality_score <- function(miss_inches){
+    x<-suppressWarnings(as.numeric(miss_inches))
+    if(!is.finite(x))return(NA_real_)
+    b<-bullpen_execution_boundaries()
+    knots<-c(0,b["dot"],b["executed"],b["competitive"],b["poor"],30,36)
+    scores<-c(100,100,90,75,45,20,0)
+    approx(knots,scores,xout=min(max(x,0),36),rule=2)$y
+  }
+  
+  bullpen_command_grade_v2 <- function(execution_quality,avg_miss,zone_pct,strike_pct){
+    miss_score<-bullpen_miss_distance_score(avg_miss)
+    if(!all(is.finite(c(execution_quality,miss_score,zone_pct,strike_pct))))return(NA_real_)
+    .35*execution_quality + .25*miss_score + .20*(100*zone_pct) + .20*(100*strike_pct)
+  }
+  
+  # For legacy callers that still pass a 0-1 execution percentage as arg 1,
+  # convert it to a reasonable 0-100 execution component. New V61 outputs use
+  # the full pitch-by-pitch execution-quality score directly.
+  bullpen_command_grade_value <- function(first_component,avg_miss,zone_pct,strike_pct){
+    x<-suppressWarnings(as.numeric(first_component))
+    if(!is.finite(x))return(NA_real_)
+    execution_quality<-if(x<=1) 55 + 45*x else x
+    bullpen_command_grade_v2(execution_quality,avg_miss,zone_pct,strike_pct)
+  }
+  
+  # Redefine target hit for legacy bullpen tables/trends as "Competitive".
+  bullpen_target_hit <- function(actual_x,actual_y,target_x,target_y,tolerance_inches=NULL){
+    d<-bullpen_miss_inches(actual_x,actual_y,target_x,target_y)
+    is.finite(d) && d<=bullpen_execution_boundaries()["competitive"]
+  }
+  
+  bullpen_session_summary <- function(d){
+    if(is.null(d)||nrow(d)==0)return(NULL)
+    strike<-as.character(d$Pitch_Result)%in%c("Called Strike","Strike")
+    zone<-if("Zone_Group"%in%names(d))as.character(d$Zone_Group)%in%c("Heart","Shadow")else rep(FALSE,nrow(d))
+    rel<-bullpen_relative_frame(d)
+    if(nrow(rel)==0)return(NULL)
+    
+    avg_miss<-mean(rel$Miss_In,na.rm=TRUE)
+    competitive_pct<-mean(rel$Miss_In<=bullpen_execution_boundaries()["competitive"],na.rm=TRUE)
+    execution_quality<-mean(vapply(rel$Miss_In,bullpen_execution_quality_score,numeric(1)),na.rm=TRUE)
+    strike_pct<-mean(strike,na.rm=TRUE)
+    zone_pct<-mean(zone,na.rm=TRUE)
+    
+    list(
+      pitches=nrow(d),
+      command_grade=bullpen_command_grade_v2(execution_quality,avg_miss,zone_pct,strike_pct),
+      strike=strike_pct,
+      zone=zone_pct,
+      target_hit=competitive_pct,
+      competitive=competitive_pct,
+      execution_quality=execution_quality,
+      avg_miss=avg_miss,
+      miss_score=bullpen_miss_distance_score(avg_miss)
+    )
+  }
+  
+  pitcher_bullpen_metrics_v61 <- reactive({
+    d<-pitcher_bullpen_data()
+    if(nrow(d)==0)return(NULL)
+    
+    strike<-as.character(d$Pitch_Result)%in%c("Called Strike","Strike")
+    zone<-if("Zone_Group"%in%names(d))as.character(d$Zone_Group)%in%c("Heart","Shadow")else rep(FALSE,nrow(d))
+    
+    miss<-vapply(seq_len(nrow(d)),function(i){
+      bullpen_miss_inches(d$Location_X[i],d$Location_Y[i],d$Bullpen_Target_X[i],d$Bullpen_Target_Y[i])
+    },numeric(1))
+    miss<-miss[is.finite(miss)]
+    if(length(miss)==0)return(NULL)
+    
+    b<-bullpen_execution_boundaries()
+    band_names<-c("Dot","Executed","Competitive","Poor","Noncompetitive")
+    bands<-factor(vapply(miss,bullpen_execution_band,character(1)),levels=band_names)
+    tab<-table(bands)
+    band_pct<-setNames(as.numeric(tab)/sum(tab),names(tab))
+    
+    execution_quality<-mean(vapply(miss,bullpen_execution_quality_score,numeric(1)))
+    avg_miss<-mean(miss)
+    strike_pct<-mean(strike,na.rm=TRUE)
+    zone_pct<-mean(zone,na.rm=TRUE)
+    competitive_pct<-mean(miss<=b["competitive"])
+    
+    list(
+      pitches=nrow(d),
+      command_grade=bullpen_command_grade_v2(execution_quality,avg_miss,zone_pct,strike_pct),
+      strike=strike_pct,
+      zone=zone_pct,
+      competitive=competitive_pct,
+      target_hit=competitive_pct,
+      execution_quality=execution_quality,
+      avg_miss=avg_miss,
+      band_pct=band_pct
+    )
+  })
+  
+  output$pitcher_bullpen_kpis<-renderUI({
+    x<-pitcher_bullpen_metrics_v61()
+    card<-function(label,value){
+      div(
+        class="bullpen-progress-card",
+        div(class="bullpen-progress-label",label),
+        div(class="bullpen-progress-value",value)
+      )
+    }
+    if(is.null(x)){
+      return(tagList(
+        card("Pitches","0"),card("Bullpen Command Grade","N/A"),
+        card("Strike %","N/A"),card("Zone %","N/A"),
+        card("Competitive %","N/A"),card("Avg Miss Distance","N/A")
+      ))
+    }
+    grade<-if(is.finite(x$command_grade))paste0(grade_letter(x$command_grade)," ",sprintf("%.1f",x$command_grade))else"N/A"
+    miss<-if(is.finite(x$avg_miss))paste0(sprintf("%.2f",x$avg_miss)," in")else"N/A"
+    tagList(
+      card("Pitches",x$pitches),
+      card("Bullpen Command Grade",grade),
+      card("Strike %",p_pct(x$strike)),
+      card("Zone %",p_pct(x$zone)),
+      card("Competitive %",p_pct(x$competitive)),
+      card("Avg Miss Distance",miss)
+    )
+  })
+  
+  output$pitcher_bullpen_execution_breakdown<-renderUI({
+    x<-pitcher_bullpen_metrics_v61()
+    if(is.null(x))return(NULL)
+    b<-bullpen_execution_boundaries()
+    bp<-x$band_pct
+    item<-function(label,value,note){
+      div(
+        style="display:inline-block;margin-right:20px;margin-bottom:4px;",
+        tags$strong(label)," ",p_pct(value),
+        tags$span(style="color:#777;font-size:11px;",paste0("  ",note))
+      )
+    }
+    div(
+      class="bullpen-session-banner",
+      style="margin-top:8px;background:#fafafa;border-left-color:#777;",
+      item("Dot",bp["Dot"],"≤ 6 in"),
+      item("Executed",bp["Executed"],"6-12 in"),
+      item("Competitive",bp["Competitive"],"12-18 in"),
+      item("Poor",bp["Poor"],"18-24 in"),
+      item("Noncompetitive",bp["Noncompetitive"],"> 24 in")
+    )
+  })
+  
+  output$pitcher_bullpen_explainer<-renderUI({
+    HTML(
+      paste0(
+        "<strong>Bullpen Command Grade 2.0:</strong> 35% Execution Quality + 25% Avg Miss Distance + 20% Zone % + 20% Strike %. ",
+        "<strong>Execution bands:</strong> Dot ≤ 6 in; Executed = 6-12 in; Competitive = 12-18 in; ",
+        "Poor = 18-24 in; Noncompetitive > 24 in. ",
+        "This rewards degrees of execution instead of a single pass/fail target radius."
+      )
+    )
+  })
+  
+  output$pitcher_bullpen_relative_note<-renderUI({
+    HTML(
+      "Every catcher target is recentered to 0,0. Positive horizontal = arm-side; negative = glove-side. Inner circle = Executed (12 in). Outer circle = Competitive (18 in)."
+    )
+  })
+  
+  output$pitcher_bullpen_direction_note<-renderUI({
+    HTML("Miss direction includes pitches that finish outside the 18-inch Competitive boundary. Arm/glove side is adjusted for pitcher handedness.")
+  })
+  
+  output$pitcher_bullpen_target_actual_plot<-renderPlot({
+    d<-pitcher_bullpen_data()
+    if(nrow(d)==0||!"Pitch_Type"%in%names(d)){
+      bullpen_plot_empty("No bullpen pitch locations in the current filters.")
+      return()
+    }
+    
+    types<-sort(unique(trimws(as.character(d$Pitch_Type))))
+    types<-types[!is.na(types)&types!=""&types!="None"]
+    if(length(types)==0){
+      bullpen_plot_empty("No bullpen pitch types are available.")
+      return()
+    }
+    
+    types<-head(types,6)
+    n<-length(types)
+    nc<-if(n<=2)n else if(n<=4)2 else 3
+    nr<-ceiling(n/nc)
+    
+    oldpar<-par(no.readonly=TRUE)
+    on.exit(par(oldpar),add=TRUE)
+    par(mfrow=c(nr,nc),mar=c(2.3,2.3,3.2,1))
+    
+    xlim<-c(.24,.76); ylim<-c(.78,.22)
+    zx1<-0.5-(0.2231/2);zx2<-0.5+(0.2231/2)
+    zy1<-0.5-(0.2596/2);zy2<-0.5+(0.2596/2)
+    
+    for(pt in types){
+      z<-d[trimws(as.character(d$Pitch_Type))==pt,,drop=FALSE]
+      x<-suppressWarnings(as.numeric(v49_flatten_column(z$Location_X)))
+      y<-suppressWarnings(as.numeric(v49_flatten_column(z$Location_Y)))
+      keep<-is.finite(x)&is.finite(y)
+      x<-x[keep]; y<-y[keep]
+      
+      if(length(x)==0){
+        plot.new();title(main=pt);text(.5,.5,"No valid locations")
+        next
+      }
+      
+      xb<-seq(xlim[1],xlim[2],length.out=22)
+      yb<-seq(min(ylim),max(ylim),length.out=22)
+      xi<-cut(x,breaks=xb,include.lowest=TRUE,labels=FALSE)
+      yi<-cut(y,breaks=yb,include.lowest=TRUE,labels=FALSE)
+      mat<-matrix(0,nrow=length(xb)-1,ncol=length(yb)-1)
+      for(i in seq_along(xi)){
+        if(is.finite(xi[i])&&is.finite(yi[i]))mat[xi[i],yi[i]]<-mat[xi[i],yi[i]]+1
+      }
+      xm<-(xb[-1]+xb[-length(xb)])/2
+      ym<-(yb[-1]+yb[-length(yb)])/2
+      pal<-colorRampPalette(c("#ffffff","#dceaf7","#72b4e4","#f5d76e","#e6804d","#A7191F"))(36)
+      
+      image(xm,ym,mat,xlim=xlim,ylim=ylim,col=pal,axes=FALSE,xlab="",ylab="",asp=1)
+      rect(zx1,zy1,zx2,zy2,border="#444444",lwd=1.7)
+      points(x,y,pch=16,cex=.45,col=adjustcolor("#222222",alpha.f=.30))
+      box(col="#cccccc")
+      
+      strike<-as.character(z$Pitch_Result)%in%c("Called Strike","Strike")
+      zone<-if("Zone_Group"%in%names(z))as.character(z$Zone_Group)%in%c("Heart","Shadow")else rep(FALSE,nrow(z))
+      rel<-bullpen_relative_frame(z)
+      comp<-if(nrow(rel)>0)mean(rel$Miss_In<=18,na.rm=TRUE)else NA_real_
+      
+      title(
+        main=paste0(pt," • ",nrow(z)," pitches"),
+        sub=paste0(
+          "Strike ",p_pct(mean(strike,na.rm=TRUE)),
+          " | Zone ",p_pct(mean(zone,na.rm=TRUE)),
+          " | Competitive ",p_pct(comp)
+        ),
+        cex.main=.90,cex.sub=.68,line=1.15
+      )
+    }
+  },bg="white")
+  
+  output$pitcher_bullpen_relative_heatmap<-renderPlot({
+    d<-bullpen_pitchtype_filter_frame(pitcher_bullpen_data())
+    rel<-bullpen_relative_frame(d)
+    if(nrow(rel)==0){
+      bullpen_plot_empty("No target-relative bullpen data.")
+      return()
+    }
+    x<-rel$ArmSide_In; y<-rel$Up_In
+    lim<-max(24,quantile(abs(c(x,y)),.96,na.rm=TRUE))
+    lim<-min(max(lim,24),40)
+    breaks<-seq(-lim,lim,length.out=24)
+    xi<-cut(x,breaks=breaks,include.lowest=TRUE,labels=FALSE)
+    yi<-cut(y,breaks=breaks,include.lowest=TRUE,labels=FALSE)
+    mat<-matrix(0,nrow=length(breaks)-1,ncol=length(breaks)-1)
+    for(i in seq_along(xi)){
+      if(is.finite(xi[i])&&is.finite(yi[i]))mat[xi[i],yi[i]]<-mat[xi[i],yi[i]]+1
+    }
+    mids<-(breaks[-1]+breaks[-length(breaks)])/2
+    pal<-colorRampPalette(c("#ffffff","#f6d6d7","#d8676b","#A7191F"))(30)
+    par(mar=c(4,4,2,1))
+    image(
+      mids,mids,mat,xlim=c(-lim,lim),ylim=c(-lim,lim),col=pal,
+      xlab="Glove Side  ←   Inches From Target   →  Arm Side",
+      ylab="Down  ←   Inches From Target   →  Up",
+      asp=1,axes=FALSE
+    )
+    axis(1);axis(2);box(col="#bbbbbb")
+    abline(h=0,v=0,col="#777777",lty=3)
+    th<-seq(0,2*pi,length.out=240)
+    lines(12*cos(th),12*sin(th),lwd=1.7,col="#444444")
+    lines(18*cos(th),18*sin(th),lwd=2,col="#111111",lty=2)
+    points(0,0,pch=3,cex=1.2,lwd=2,col="#222222")
+    text(0,12.8,"Executed 12 in",cex=.65,font=2)
+    text(0,18.8,"Competitive 18 in",cex=.65,font=2)
+  },bg="white")
+  
+  output$pitcher_bullpen_pitch_type_table<-renderUI({
+    d<-pitcher_bullpen_data()
+    if(nrow(d)==0||!"Pitch_Type"%in%names(d)){
+      return(div(class="report-breakdown-note","No bullpen pitch-type data available."))
+    }
+    types<-unique(as.character(d$Pitch_Type))
+    types<-types[!is.na(types)&types!=""&types!="None"]
+    rows<-lapply(types,function(pt){
+      z<-d[as.character(d$Pitch_Type)==pt,,drop=FALSE]
+      strike<-as.character(z$Pitch_Result)%in%c("Called Strike","Strike")
+      zone<-if("Zone_Group"%in%names(z))as.character(z$Zone_Group)%in%c("Heart","Shadow")else rep(FALSE,nrow(z))
+      rel<-bullpen_relative_frame(z)
+      avg_miss<-if(nrow(rel)>0)mean(rel$Miss_In,na.rm=TRUE)else NA_real_
+      eq<-if(nrow(rel)>0)mean(vapply(rel$Miss_In,bullpen_execution_quality_score,numeric(1)),na.rm=TRUE)else NA_real_
+      comp<-if(nrow(rel)>0)mean(rel$Miss_In<=18,na.rm=TRUE)else NA_real_
+      dot<-if(nrow(rel)>0)mean(rel$Miss_In<=6,na.rm=TRUE)else NA_real_
+      grade<-bullpen_command_grade_v2(eq,avg_miss,mean(zone,na.rm=TRUE),mean(strike,na.rm=TRUE))
+      data.frame(Pitch=pt,Pitches=nrow(z),Grade=grade,Strike=mean(strike,na.rm=TRUE),
+                 Zone=mean(zone,na.rm=TRUE),Competitive=comp,Dot=dot,AvgMiss=avg_miss,
+                 stringsAsFactors=FALSE)
+    })
+    df<-do.call(rbind,rows)
+    df<-df[order(-df$Pitches),,drop=FALSE]
+    tags$table(
+      class="table table-striped table-condensed",
+      tags$thead(tags$tr(
+        tags$th("Pitch"),tags$th("Pitches"),tags$th("Grade"),
+        tags$th("Strike %"),tags$th("Zone %"),tags$th("Competitive %"),
+        tags$th("Dot %"),tags$th("Avg Miss")
+      )),
+      tags$tbody(lapply(seq_len(nrow(df)),function(i){
+        r<-df[i,,drop=FALSE]
+        tags$tr(
+          tags$td(r$Pitch),tags$td(r$Pitches),
+          tags$td(if(is.finite(r$Grade))paste0(grade_letter(r$Grade)," ",sprintf("%.1f",r$Grade))else"N/A"),
+          tags$td(p_pct(r$Strike)),tags$td(p_pct(r$Zone)),
+          tags$td(p_pct(r$Competitive)),tags$td(p_pct(r$Dot)),
+          tags$td(if(is.finite(r$AvgMiss))paste0(sprintf("%.2f",r$AvgMiss)," in")else"N/A")
+        )
+      }))
+    )
+  })
+  
+  # Keep the settings UI aligned with Command 2.0 for this session.
+  observeEvent(TRUE,{
+    updateNumericInput(session,"setting_target_execution",value=12)
+    updateNumericInput(session,"setting_weight_target",value=.35)
+    updateNumericInput(session,"setting_weight_miss",value=.25)
+    updateNumericInput(session,"setting_weight_zone",value=.20)
+    updateNumericInput(session,"setting_weight_strike",value=.20)
+  },once=TRUE)
+  
   
   # ==================================================
   # STARTUP INITIALIZATION
