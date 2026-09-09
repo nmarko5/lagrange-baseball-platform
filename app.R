@@ -15697,6 +15697,163 @@ server <- function(input, output, session) {
   },once=TRUE)
   
   
+  
+  # ==================================================
+  # V62.2 — SAFE ORGANIZATION ONBOARDING RETRY
+  # ==================================================
+  # The first Georgia State import exposed a googlesheets4 sheet_names()
+  # failure that surfaces as the unhelpful purrr message "In index: 3.".
+  # V62.2 removes sheet_names() from every function used by onboarding.
+  # It checks each required sheet directly and only creates it when absent.
+  # The importer remains deterministic/upsert-based, so retrying after a
+  # partial import updates the same records instead of creating duplicates.
+  
+  v622_sheet_exists <- function(sheet_name){
+    tryCatch({
+      googlesheets4::range_read(
+        ss=SHEET_URL,
+        sheet=sheet_name,
+        range="A1:A1",
+        col_names=FALSE,
+        col_types="c"
+      )
+      TRUE
+    },error=function(e) FALSE)
+  }
+  
+  v622_create_sheet_with_headers <- function(sheet_name,headers){
+    if(!v622_sheet_exists(sheet_name)){
+      googlesheets4::sheet_add(SHEET_URL,sheet_name)
+      header <- as.data.frame(
+        as.list(setNames(headers,headers)),
+        stringsAsFactors=FALSE,
+        check.names=FALSE
+      )
+      last_col <- if(length(headers)<=26) LETTERS[length(headers)] else stop("Too many onboarding header columns.")
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=header,
+        sheet=sheet_name,
+        range=paste0("A1:",last_col,"1"),
+        col_names=FALSE
+      )
+    }
+    invisible(TRUE)
+  }
+  
+  ensure_organizations_sheet <- function(){
+    tryCatch({
+      v622_create_sheet_with_headers(
+        "Organizations",
+        c(
+          "Organization_ID","Organization_Name","Short_Name","Primary_Color",
+          "Secondary_Color","Accent_Color","Logo_URL","App_Title","Active"
+        )
+      )
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Organizations setup error: ",e$message))
+      FALSE
+    })
+  }
+  
+  ensure_users_sheet <- function(){
+    tryCatch({
+      v622_create_sheet_with_headers(
+        "Users",
+        c("User_ID","Organization_ID","Display_Name","Email","Role","Active")
+      )
+      d <- as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,sheet="Users",range="A1:F1001",col_names=TRUE,col_types="c"
+        ),stringsAsFactors=FALSE
+      )
+      has_users <- nrow(d)>0 && "User_ID" %in% names(d) &&
+        any(!is.na(d$User_ID) & trimws(as.character(d$User_ID))!="")
+      if(!has_users){
+        googlesheets4::sheet_append(
+          ss=SHEET_URL,
+          data=data.frame(
+            User_ID="LAGRANGE_USER_NATE_MARKO",
+            Organization_ID=setting_chr("Organization_ID","LAGRANGE"),
+            Display_Name=setting_chr("Default_Charting_User","Nate Marko"),
+            Email="",Role="Admin",Active="TRUE",stringsAsFactors=FALSE
+          ),
+          sheet="Users"
+        )
+      }
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Users setup error: ",e$message))
+      FALSE
+    })
+  }
+  
+  ensure_season_architecture_sheets <- function(){
+    tryCatch({
+      specs <- list(
+        Seasons=c("Season_ID","Organization_ID","Season_Name","Start_Date","End_Date","Active"),
+        Periods=c(
+          "Period_ID","Organization_ID","Season_ID","Period_Name","Period_Type",
+          "Start_Date","End_Date","Counts_Toward_Official_Stats","Active"
+        ),
+        Subscriptions=c(
+          "Subscription_ID","Organization_ID","Season_ID","Access_Status",
+          "Start_Date","End_Date","Notes"
+        ),
+        Roster_Memberships=c(
+          "Roster_Membership_ID","Organization_ID","Season_ID","Player_ID",
+          "Status","Class_Year","Jersey_Number","Primary_Position"
+        )
+      )
+      for(sheet_name in names(specs)){
+        v622_create_sheet_with_headers(sheet_name,specs[[sheet_name]])
+      }
+      
+      # Sessions already exists in the live backend. Only ensure the two
+      # season/period header cells used by the architecture; do not enumerate
+      # workbook sheets or perform any destructive maintenance here.
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=data.frame(Season_ID="Season_ID",Period_ID="Period_ID",stringsAsFactors=FALSE),
+        sheet="Sessions",range="M1:N1",col_names=FALSE
+      )
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Season architecture setup error: ",e$message))
+      FALSE
+    })
+  }
+  
+  ensure_entitlements_sheet <- function(){
+    tryCatch({
+      v622_create_sheet_with_headers(
+        "Entitlements",
+        c(
+          "Entitlement_ID","Organization_ID","Season_ID","Feature_Key",
+          "Enabled","Package","Notes"
+        )
+      )
+      invisible(TRUE)
+    },error=function(e){
+      settings_message(paste0("Entitlements setup error: ",e$message))
+      stop(e)
+    })
+  }
+  
+  # Harden the onboarding prerequisite check. A failed prerequisite now stops
+  # before any organization rows are rewritten, instead of allowing a partial
+  # setup failure to cascade into a vague later error.
+  ensure_v60_onboarding_backend <- function(){
+    ok_org <- isTRUE(ensure_organizations_sheet())
+    ok_users <- isTRUE(ensure_users_sheet())
+    ok_seasons <- isTRUE(ensure_season_architecture_sheets())
+    if(!ok_org || !ok_users || !ok_seasons){
+      stop("Organization onboarding backend setup could not be completed.")
+    }
+    TRUE
+  }
+  
   # ==================================================
   # STARTUP INITIALIZATION
   # ==================================================
