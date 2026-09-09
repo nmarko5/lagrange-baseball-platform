@@ -1661,6 +1661,20 @@ ui <- fluidPage(
     });
   ")),
   
+  tags$script(HTML("
+    Shiny.addCustomMessageHandler('v62FeatureAccess', function(x) {
+      function toggle(id, enabled) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = enabled ? '' : 'none';
+      }
+      toggle('nav_hitter_reports', !!x.hitting);
+      toggle('nav_pitcher_reports', !!x.pitching);
+      toggle('nav_leaderboards', !!x.leaderboards);
+      toggle('nav_team_reports', !!x.team_reports);
+      toggle('bullpen_report_section', !!x.bullpen);
+    });
+  ")),
+  
   div(
     class = "app-sidebar",
     
@@ -1670,6 +1684,7 @@ ui <- fluidPage(
     ),
     
     tags$a(
+      id = "nav_live_charting",
       class = "app-nav-item active",
       href = "#",
       onclick = "return switchMainTab('Live Charting', this);",
@@ -1678,6 +1693,7 @@ ui <- fluidPage(
     ),
     
     tags$a(
+      id = "nav_hitter_reports",
       class = "app-nav-item",
       href = "#",
       onclick = "return switchMainTab('Hitter Report', this);",
@@ -1686,6 +1702,7 @@ ui <- fluidPage(
     ),
     
     tags$a(
+      id = "nav_pitcher_reports",
       class = "app-nav-item",
       href = "#",
       onclick = "return switchMainTab('Pitcher Report', this);",
@@ -1694,6 +1711,7 @@ ui <- fluidPage(
     ),
     
     tags$a(
+      id = "nav_leaderboards",
       class = "app-nav-item",
       href = "#",
       onclick = "return switchMainTab('Leaderboard', this);",
@@ -1702,6 +1720,7 @@ ui <- fluidPage(
     ),
     
     tags$a(
+      id = "nav_team_reports",
       class = "app-nav-item",
       href = "#",
       onclick = "return switchMainTab('Team Report', this);",
@@ -2751,6 +2770,7 @@ ui <- fluidPage(
           div(class="pitcher-section-note","K%, BB%, K-BB%, HR%, BABIP and opponent slash line are supported from charted PA data. ERA, xERA, FIP, xFIP, GS, QS and CG require run/game-state data or league constants that this manual system does not currently collect, so they are intentionally not estimated.")
         ),
         div(
+          id="bullpen_report_section",
           class="pitcher-section-card",
           style="margin-bottom:8px;",
           div(class="pitcher-section-title","Bullpen Progress"),
@@ -3158,6 +3178,19 @@ ui <- fluidPage(
                   uiOutput("org_import_preview_ui")
               ),
               div(class="admin-card",
+                  div(class="admin-title","Organization Features / Entitlements"),
+                  uiOutput("entitlement_status"),
+                  checkboxInput("ent_hitting","Hitting / Hitter Reports",value=TRUE),
+                  checkboxInput("ent_pitching","Pitching / Pitcher Reports",value=TRUE),
+                  checkboxInput("ent_bullpen","Bullpen Mode + Bullpen Reports",value=TRUE),
+                  checkboxInput("ent_leaderboards","Leaderboards",value=TRUE),
+                  checkboxInput("ent_team_reports","Team Reports",value=TRUE),
+                  actionButton("entitlements_save","SAVE FEATURE ACCESS"),
+                  div(class="admin-note",
+                      "V62 foundation for future pricing tiers. Disabled modules are removed from that organization's interface. ",
+                      "The backend keeps historical data even when a feature is turned off.")
+              ),
+              div(class="admin-card",
                   div(class="admin-title","Backend Maintenance"),
                   div(class="admin-note",
                       "Maintenance is manual in V59 so normal startup stays fast. ",
@@ -3207,6 +3240,11 @@ ui <- fluidPage(
 # ==================================================
 
 # ==================================================
+# V62 — ORGANIZATION ENTITLEMENTS + INITIAL ADMIN ONBOARDING
+# Built directly on V61. Adds per-organization feature flags and imports one initial admin user.
+# Georgia State first external-client test: Will Maddox only.
+# ==================================================
+
 # V60 — ORGANIZATION ONBOARDING / MULTI-TEAM IMPORT
 # Built directly on stable V59.
 # Adds workbook-driven client onboarding and dynamic organization branding.
@@ -15388,6 +15426,245 @@ server <- function(input, output, session) {
     )
   })
   
+  
+  # ==================================================
+  # V62 — ORGANIZATION ENTITLEMENTS + INITIAL ADMIN ONBOARDING
+  # ==================================================
+  entitlement_features <- c(
+    Hitting="HITTING",
+    Pitching="PITCHING",
+    Bullpen="BULLPEN",
+    Leaderboards="LEADERBOARDS",
+    Team_Reports="TEAM_REPORTS"
+  )
+  
+  entitlement_cache <- reactiveVal(data.frame())
+  entitlement_message <- reactiveVal(NULL)
+  
+  ensure_entitlements_sheet <- function(){
+    existing <- googlesheets4::sheet_names(SHEET_URL)
+    headers <- c(
+      "Entitlement_ID","Organization_ID","Season_ID","Feature_Key",
+      "Enabled","Package","Notes"
+    )
+    if(!"Entitlements" %in% existing){
+      googlesheets4::sheet_add(SHEET_URL,"Entitlements")
+      googlesheets4::range_write(
+        ss=SHEET_URL,
+        data=as.data.frame(as.list(setNames(headers,headers)),stringsAsFactors=FALSE,check.names=FALSE),
+        sheet="Entitlements",range="A1:G1",col_names=FALSE
+      )
+    }
+    invisible(TRUE)
+  }
+  
+  v62_current_season_id <- function(org_id=current_org_id()){
+    d <- season_architecture()
+    if(is.null(d) || !is.list(d) || is.null(d$seasons) || nrow(d$seasons)==0) return("")
+    ss <- d$seasons
+    if(!all(c("Organization_ID","Season_ID") %in% names(ss))) return("")
+    hit <- trimws(as.character(ss$Organization_ID))==trimws(org_id)
+    if("Active" %in% names(ss)){
+      active <- toupper(trimws(as.character(ss$Active))) %in% c("TRUE","T","1","YES","Y")
+      if(any(hit & active,na.rm=TRUE)) hit <- hit & active
+    }
+    rows <- ss[hit,,drop=FALSE]
+    if(nrow(rows)==0) return("")
+    as.character(rows$Season_ID[1])
+  }
+  
+  v62_default_entitlements <- function(org_id,season_id=""){
+    data.frame(
+      Entitlement_ID=paste0(org_id,"_ENT_",unname(entitlement_features)),
+      Organization_ID=org_id,
+      Season_ID=season_id,
+      Feature_Key=unname(entitlement_features),
+      Enabled="TRUE",
+      Package="Complete Trial",
+      Notes="V62 default entitlement",
+      stringsAsFactors=FALSE
+    )
+  }
+  
+  load_entitlements <- function(){
+    tryCatch({
+      d <- as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,sheet="Entitlements",range="A1:G1001",col_names=TRUE
+        ),stringsAsFactors=FALSE
+      )
+      entitlement_cache(d)
+      TRUE
+    },error=function(e){
+      # V62 is backward compatible before the first explicit maintenance/import.
+      entitlement_cache(data.frame())
+      FALSE
+    })
+  }
+  
+  current_feature_access <- reactive({
+    org <- current_org_id()
+    d <- entitlement_cache()
+    defaults <- setNames(rep(TRUE,length(entitlement_features)),unname(entitlement_features))
+    if(is.null(d) || nrow(d)==0 || !all(c("Organization_ID","Feature_Key","Enabled") %in% names(d))){
+      return(defaults)
+    }
+    x <- d[trimws(as.character(d$Organization_ID))==org,,drop=FALSE]
+    if(nrow(x)==0) return(defaults)
+    for(k in names(defaults)){
+      hit <- toupper(trimws(as.character(x$Feature_Key)))==k
+      if(any(hit,na.rm=TRUE)){
+        val <- toupper(trimws(as.character(x$Enabled[which(hit)[1]])))
+        defaults[[k]] <- val %in% c("TRUE","T","1","YES","Y","ON")
+      }
+    }
+    defaults
+  })
+  
+  v62_push_feature_access <- function(){
+    a <- current_feature_access()
+    session$sendCustomMessage("v62FeatureAccess",list(
+      hitting=isTRUE(a[["HITTING"]]),
+      pitching=isTRUE(a[["PITCHING"]]),
+      bullpen=isTRUE(a[["BULLPEN"]]),
+      leaderboards=isTRUE(a[["LEADERBOARDS"]]),
+      team_reports=isTRUE(a[["TEAM_REPORTS"]])
+    ))
+    updateSelectInput(
+      session,"charting_mode",
+      choices=if(isTRUE(a[["BULLPEN"]])) c("Live AB / Game"="Live","Bullpen"="Bullpen") else c("Live AB / Game"="Live"),
+      selected=if(!isTRUE(a[["BULLPEN"]]) && identical(input$charting_mode,"Bullpen")) "Live" else input$charting_mode
+    )
+  }
+  
+  observeEvent(current_feature_access(),{
+    a <- current_feature_access()
+    updateCheckboxInput(session,"ent_hitting",value=isTRUE(a[["HITTING"]]))
+    updateCheckboxInput(session,"ent_pitching",value=isTRUE(a[["PITCHING"]]))
+    updateCheckboxInput(session,"ent_bullpen",value=isTRUE(a[["BULLPEN"]]))
+    updateCheckboxInput(session,"ent_leaderboards",value=isTRUE(a[["LEADERBOARDS"]]))
+    updateCheckboxInput(session,"ent_team_reports",value=isTRUE(a[["TEAM_REPORTS"]]))
+    v62_push_feature_access()
+  },ignoreInit=FALSE)
+  
+  output$entitlement_status <- renderUI({
+    a <- current_feature_access()
+    enabled <- names(a)[vapply(a,isTRUE,logical(1))]
+    disabled <- names(a)[!vapply(a,isTRUE,logical(1))]
+    msg <- entitlement_message()
+    div(
+      if(!is.null(msg)) div(class="admin-note",style="margin-bottom:8px;",msg),
+      div(class="multi-user-ready",HTML(paste0(
+        "<strong>Organization:</strong> ",current_org_id(),"<br>",
+        "<strong>Enabled:</strong> ",paste(enabled,collapse=", "),"<br>",
+        "<strong>Disabled:</strong> ",if(length(disabled)==0)"None"else paste(disabled,collapse=", ")
+      )))
+    )
+  })
+  
+  observeEvent(input$entitlements_save,{
+    if(current_user_role()!="Admin"){
+      entitlement_message("Admin role is required to change organization features.")
+      return()
+    }
+    tryCatch({
+      ensure_entitlements_sheet()
+      headers <- c("Entitlement_ID","Organization_ID","Season_ID","Feature_Key","Enabled","Package","Notes")
+      all_ent <- v60_read_or_empty("Entitlements","A1:G1001",headers)
+      org <- current_org_id()
+      season_id <- v62_current_season_id(org)
+      vals <- c(
+        HITTING=isTRUE(input$ent_hitting),
+        PITCHING=isTRUE(input$ent_pitching),
+        BULLPEN=isTRUE(input$ent_bullpen),
+        LEADERBOARDS=isTRUE(input$ent_leaderboards),
+        TEAM_REPORTS=isTRUE(input$ent_team_reports)
+      )
+      for(k in names(vals)){
+        row <- data.frame(
+          Entitlement_ID=paste0(org,"_ENT_",k),Organization_ID=org,Season_ID=season_id,
+          Feature_Key=k,Enabled=if(vals[[k]])"TRUE"else"FALSE",
+          Package="Custom",Notes="Saved from V62 Settings",stringsAsFactors=FALSE
+        )
+        all_ent <- v60_upsert_row(all_ent,row,c("Entitlement_ID"))
+      }
+      v60_rewrite_sheet("Entitlements","G1001",headers,all_ent)
+      load_entitlements()
+      entitlement_message("Feature access saved.")
+    },error=function(e){
+      entitlement_message(paste0("Feature access save error: ",e$message))
+    })
+  })
+  
+  # V62 importer policy: onboard one initial organization admin only.
+  # This keeps the first rollout simple; that admin can later be used to test
+  # organization-scoped access before coach invitations/authentication are added.
+  v62_initial_admin_only <- function(parsed){
+    coaches <- parsed$coaches
+    if(is.null(coaches) || nrow(coaches)==0) stop("At least one coach/user is required.")
+    populated <- trimws(as.character(coaches$Display_Name))!=""
+    coaches <- coaches[populated,,drop=FALSE]
+    if(nrow(coaches)==0) stop("At least one populated coach/user is required.")
+    # For Georgia State specifically, prefer Will Maddox regardless of row order.
+    if(identical(parsed$organization_id,"GEORGIA_STATE_UNIVERSITY") ||
+       grepl("GEORGIA_STATE",parsed$organization_id,fixed=TRUE)){
+      will <- tolower(trimws(as.character(coaches$Display_Name)))=="will maddox"
+      if(any(will,na.rm=TRUE)) coaches <- coaches[which(will)[1],,drop=FALSE] else coaches <- coaches[1,,drop=FALSE]
+      parsed$organization_id <- "GEORGIA_STATE"
+    }else{
+      coaches <- coaches[1,,drop=FALSE]
+    }
+    coaches$Role <- "Admin"
+    coaches$Active <- "TRUE"
+    parsed$coaches <- coaches
+    
+    # Normalize common client-friendly color names when supplied instead of hex.
+    org <- parsed$organization
+    color_map <- c(
+      "royal blue"="#0039A6","blue"="#0039A6","black"="#000000",
+      "red"="#C8102E","white"="#FFFFFF","navy"="#001F5B"
+    )
+    for(col in c("Primary_Color","Secondary_Color","Accent_Color")){
+      raw <- tolower(trimws(v60_chr(org[[col]],"")))
+      if(nzchar(raw) && !grepl("^#[0-9A-Fa-f]{6}$",raw) && raw %in% names(color_map)){
+        org[[col]] <- unname(color_map[[raw]])
+      }
+    }
+    parsed$organization <- org
+    parsed
+  }
+  
+  # Preview uses the same normalization policy as the actual import so the
+  # coach count / organization ID shown to Nate matches what will be written.
+  v61_parse_onboarding_workbook_base <- v60_parse_onboarding_workbook
+  v60_parse_onboarding_workbook <- function(path){
+    v62_initial_admin_only(v61_parse_onboarding_workbook_base(path))
+  }
+  
+  v61_import_organization_base <- v60_import_organization
+  v60_import_organization <- function(parsed){
+    parsed <- v62_initial_admin_only(parsed)
+    result <- v61_import_organization_base(parsed)
+    
+    # Every newly onboarded organization receives explicit feature records.
+    ensure_entitlements_sheet()
+    headers <- c("Entitlement_ID","Organization_ID","Season_ID","Feature_Key","Enabled","Package","Notes")
+    all_ent <- v60_read_or_empty("Entitlements","A1:G1001",headers)
+    defaults <- v62_default_entitlements(result$organization_id,result$season_id)
+    for(i in seq_len(nrow(defaults))){
+      all_ent <- v60_upsert_row(all_ent,defaults[i,,drop=FALSE],c("Entitlement_ID"))
+    }
+    v60_rewrite_sheet("Entitlements","G1001",headers,all_ent)
+    load_entitlements()
+    result$coaches <- 1L
+    result
+  }
+  
+  # Refresh entitlements whenever the development identity changes organizations.
+  observeEvent(active_user_id(),{
+    load_entitlements()
+  },ignoreInit=TRUE)
+  
   # Keep the settings UI aligned with Command 2.0 for this session.
   observeEvent(TRUE,{
     updateNumericInput(session,"setting_target_execution",value=12)
@@ -15413,6 +15690,7 @@ server <- function(input, output, session) {
     load_organizations()
     load_user_directory()
     load_season_architecture()
+    load_entitlements()
     
     # One backend snapshot for Sessions / Pitches / Plate Appearances.
     refresh_sessions_admin_data()
