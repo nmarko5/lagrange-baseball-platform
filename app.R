@@ -5276,11 +5276,30 @@ server <- function(input, output, session) {
     
     if(!all(c("Season_ID","Player_ID")%in%names(rm)))return(data.frame())
     
-    rm[
-      trimws(as.character(rm$Season_ID))==trimws(as.character(sid)),
-      ,
-      drop=FALSE
-    ]
+    # V62.1: ignore blank/placeholder roster rows.
+    # Google Sheets can return preformatted empty rows with the season/status
+    # populated but no real player identity; those should never count or render.
+    season_col <- trimws(as.character(rm$Season_ID))
+    player_col <- trimws(as.character(rm$Player_ID))
+    
+    valid_player <- !is.na(player_col) & nzchar(player_col) &
+      !toupper(player_col) %in% c("NA", "N/A", "NULL", "NONE")
+    in_season <- !is.na(season_col) &
+      season_col == trimws(as.character(sid))
+    
+    cleaned <- rm[in_season & valid_player, , drop=FALSE]
+    
+    # If the player directory is available, require a real matching Player_ID.
+    # This prevents orphan/blank backend rows from appearing in roster management.
+    players <- player_lookup()
+    if(!is.null(players) && nrow(players) > 0 && "Player_ID" %in% names(players)){
+      valid_ids <- trimws(as.character(players$Player_ID))
+      valid_ids <- valid_ids[!is.na(valid_ids) & nzchar(valid_ids) &
+                               !toupper(valid_ids) %in% c("NA", "N/A", "NULL", "NONE")]
+      cleaned <- cleaned[trimws(as.character(cleaned$Player_ID)) %in% valid_ids, , drop=FALSE]
+    }
+    
+    cleaned
   })
   
   refresh_roster_management_ui <- function(){
@@ -15428,6 +15447,9 @@ server <- function(input, output, session) {
   
   
   # ==================================================
+  # V62.1 — ROSTER DISPLAY CLEANUP
+  # Filters empty/orphan roster membership rows from counts and tables.
+  
   # V62 — ORGANIZATION ENTITLEMENTS + INITIAL ADMIN ONBOARDING
   # ==================================================
   entitlement_features <- c(
