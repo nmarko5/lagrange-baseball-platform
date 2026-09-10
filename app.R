@@ -1673,6 +1673,22 @@ ui <- fluidPage(
       toggle('nav_team_reports', !!x.team_reports);
       toggle('bullpen_report_section', !!x.bullpen);
     });
+    Shiny.addCustomMessageHandler('v625PlatformAdminAccess', function(x) {
+      function toggle(id, enabled) {
+        var el = document.getElementById(id);
+        if (el) el.style.display = enabled ? '' : 'none';
+      }
+      toggle('platform_onboarding_card', !!x.platform_admin);
+      toggle('platform_entitlements_card', !!x.platform_admin);
+
+      // Development identity selector is owner-only visually.
+      // This is NOT authentication; real account isolation comes with Connect Cloud auth.
+      var sel = document.getElementById('setting_active_user');
+      if (sel) {
+        var group = sel.closest('.form-group');
+        if (group) group.style.display = x.platform_admin ? '' : 'none';
+      }
+    });
   ")),
   
   div(
@@ -3154,7 +3170,7 @@ ui <- fluidPage(
                       "Roster memberships are season-specific. Removing a player from a future season does not delete ",
                       "the player's identity or historical data from earlier seasons.")
               ),
-              div(class="admin-card",
+              div(id="platform_onboarding_card",class="admin-card",
                   div(class="admin-title","Organization Onboarding"),
                   div(class="admin-note",
                       "Platform-owner workflow: upload the completed onboarding workbook, review the preview, ",
@@ -3177,7 +3193,7 @@ ui <- fluidPage(
                   uiOutput("org_import_status"),
                   uiOutput("org_import_preview_ui")
               ),
-              div(class="admin-card",
+              div(id="platform_entitlements_card",class="admin-card",
                   div(class="admin-title","Organization Features / Entitlements"),
                   uiOutput("entitlement_status"),
                   checkboxInput("ent_hitting","Hitting / Hitter Reports",value=TRUE),
@@ -3478,6 +3494,9 @@ server <- function(input, output, session) {
   settings_message <- reactiveVal(NULL)
   user_directory <- reactiveVal(data.frame())
   active_user_id <- reactiveVal("")
+  # V62.6.2: session-scoped platform-owner flag for development impersonation.
+  # This is not production authentication.
+  platform_owner_session <- reactiveVal(FALSE)
   seasons_directory <- reactiveVal(data.frame())
   periods_directory <- reactiveVal(data.frame())
   subscriptions_directory <- reactiveVal(data.frame())
@@ -5544,8 +5563,8 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$org_import_preview,{
-    if(current_user_role()!="Admin"){
-      org_import_message("Import error: Admin role is required.")
+    if(!identical(trimws(as.character(active_user_id())),"LAGRANGE_USER_NATE_MARKO")){
+      org_import_message("Import error: Platform Admin access is required.")
       return()
     }
     if(is.null(input$org_import_file)){
@@ -5570,8 +5589,8 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$org_import_execute,{
-    if(current_user_role()!="Admin"){
-      org_import_message("Import error: Admin role is required.")
+    if(!identical(trimws(as.character(active_user_id())),"LAGRANGE_USER_NATE_MARKO")){
+      org_import_message("Import error: Platform Admin access is required.")
       return()
     }
     if(!isTRUE(input$org_import_confirm)){
@@ -6511,7 +6530,7 @@ server <- function(input, output, session) {
             sheet_url = SHEET_URL
           )
           
-          players_data <- as.data.frame(players_data,stringsAsFactors=FALSE)
+          players_data <- v6265_normalize_player_schema(players_data)
           if(nrow(players_data)>0&&"Organization_ID"%in%names(players_data)){
             players_data<-players_data[trimws(as.character(players_data$Organization_ID))==current_org_id(),,drop=FALSE]
           }
@@ -12456,6 +12475,46 @@ server <- function(input, output, session) {
     pitch_type <-
       selected_pitch_type()
     
+    # V62.6.4: validate IDs before building the pitch row.
+    # Missing reactive values were reaching ifelse() as NULL and crashing the observer.
+    chart_mode <- if(is.null(input$charting_mode) || length(input$charting_mode)==0) "Live" else as.character(input$charting_mode[[1]])
+    batter_id_now <- current_batter_id()
+    pitcher_id_now <- current_pitcher_id()
+    
+    if(!identical(chart_mode,"Bullpen")){
+      if(is.null(batter_id_now) || length(batter_id_now)==0 || is.na(batter_id_now[[1]]) ||
+         !nzchar(trimws(as.character(batter_id_now[[1]])))){
+        save_status("Select a batter before saving the pitch.")
+        return(FALSE)
+      }
+    }
+    
+    if(is.null(pitcher_id_now) || length(pitcher_id_now)==0 || is.na(pitcher_id_now[[1]]) ||
+       !nzchar(trimws(as.character(pitcher_id_now[[1]])))){
+      save_status("Select a pitcher before saving the pitch.")
+      return(FALSE)
+    }
+    
+    if(is.null(zone) || length(zone)==0 || is.na(zone[[1]])){
+      save_status("Select a pitch location before saving the pitch.")
+      return(FALSE)
+    }
+    
+    if(is.null(pitch_type) || length(pitch_type)==0 || is.na(pitch_type[[1]]) ||
+       !nzchar(trimws(as.character(pitch_type[[1]])))){
+      save_status("Select a pitch type before saving the pitch.")
+      return(FALSE)
+    }
+    
+    pa_id_now <- if(identical(chart_mode,"Bullpen")) "" else current_pa_id()
+    if(!identical(chart_mode,"Bullpen") &&
+       (is.null(pa_id_now) || length(pa_id_now)==0 || is.na(pa_id_now[[1]]) ||
+        !nzchar(trimws(as.character(pa_id_now[[1]]))))){
+      save_status("Could not initialize the plate appearance. Re-select the session and try again.")
+      return(FALSE)
+    }
+    
+    
     balls_before <- balls()
     strikes_before <- strikes()
     
@@ -12483,16 +12542,16 @@ server <- function(input, output, session) {
           session_id,
         
         PA_ID =
-          ifelse(identical(input$charting_mode,"Bullpen"),"",current_pa_id()),
+          if(identical(chart_mode,"Bullpen")) "" else as.character(pa_id_now[[1]]),
         
         Pitch_Number =
           pitch_number(),
         
         Batter_ID =
-          ifelse(identical(input$charting_mode,"Bullpen"),"",current_batter_id()),
+          if(identical(chart_mode,"Bullpen")) "" else as.character(batter_id_now[[1]]),
         
         Pitcher_ID =
-          current_pitcher_id(),
+          as.character(pitcher_id_now[[1]]),
         
         Balls_Before =
           balls_before,
@@ -12532,7 +12591,7 @@ server <- function(input, output, session) {
           pitch_result,
         
         Swing_Take =
-          ifelse(identical(input$charting_mode,"Bullpen"),"",swing_take(pitch_result)),
+          if(identical(chart_mode,"Bullpen")) "" else swing_take(pitch_result),
         
         Contact_Quality =
           contact_quality,
@@ -12577,18 +12636,18 @@ server <- function(input, output, session) {
         pitch_location_data <- data.frame(
           Location_X=ifelse(is.null(location_x)||is.na(location_x),"",round(location_x,6)),
           Location_Y=ifelse(is.null(location_y)||is.na(location_y),"",round(location_y,6)),
-          Inning=ifelse(identical(input$charting_mode,"Bullpen"),"",ifelse(is.null(input$inning_number)||is.na(input$inning_number),"",as.integer(input$inning_number))),
-          Half_Inning=ifelse(identical(input$charting_mode,"Bullpen"),"",ifelse(is.null(input$inning_half)||input$inning_half=="","Top",as.character(input$inning_half))),
-          Outs_Before=ifelse(identical(input$charting_mode,"Bullpen"),"",as.integer(game_outs())),
+          Inning=ifelse(identical(chart_mode,"Bullpen"),"",ifelse(is.null(input$inning_number)||is.na(input$inning_number),"",as.integer(input$inning_number))),
+          Half_Inning=ifelse(identical(chart_mode,"Bullpen"),"",ifelse(is.null(input$inning_half)||input$inning_half=="","Top",as.character(input$inning_half))),
+          Outs_Before=ifelse(identical(chart_mode,"Bullpen"),"",as.integer(game_outs())),
           stringsAsFactors=FALSE
         )
         bullpen_extra_data <- data.frame(
-          Charting_Mode=ifelse(identical(input$charting_mode,"Bullpen"),"Bullpen","Live"),
-          Bullpen_Target_X=ifelse(identical(input$charting_mode,"Bullpen")&&!is.null(bullpen_target_x()),round(as.numeric(bullpen_target_x()),6),""),
-          Bullpen_Target_Y=ifelse(identical(input$charting_mode,"Bullpen")&&!is.null(bullpen_target_y()),round(as.numeric(bullpen_target_y()),6),""),
-          Bullpen_Target_Zone=ifelse(identical(input$charting_mode,"Bullpen")&&!is.null(bullpen_target_zone()),as.character(bullpen_target_zone()),""),
-          Bullpen_Focus=ifelse(identical(input$charting_mode,"Bullpen"),as.character(input$bullpen_focus),""),
-          Bullpen_Notes=ifelse(identical(input$charting_mode,"Bullpen"),as.character(input$bullpen_notes),""),
+          Charting_Mode=ifelse(identical(chart_mode,"Bullpen"),"Bullpen","Live"),
+          Bullpen_Target_X=ifelse(identical(chart_mode,"Bullpen")&&!is.null(bullpen_target_x()),round(as.numeric(bullpen_target_x()),6),""),
+          Bullpen_Target_Y=ifelse(identical(chart_mode,"Bullpen")&&!is.null(bullpen_target_y()),round(as.numeric(bullpen_target_y()),6),""),
+          Bullpen_Target_Zone=ifelse(identical(chart_mode,"Bullpen")&&!is.null(bullpen_target_zone()),as.character(bullpen_target_zone()),""),
+          Bullpen_Focus=ifelse(identical(chart_mode,"Bullpen"),as.character(input$bullpen_focus),""),
+          Bullpen_Notes=ifelse(identical(chart_mode,"Bullpen"),as.character(input$bullpen_notes),""),
           stringsAsFactors=FALSE
         )
         ensure_multi_user_pitch_columns()
@@ -12612,7 +12671,7 @@ server <- function(input, output, session) {
           )
         )
         
-        if(!identical(input$charting_mode,"Bullpen")) {
+        if(!identical(chart_mode,"Bullpen")) {
           pa_pitch_count(pa_pitch_count()+1)
           if(is.finite(suppressWarnings(as.numeric(strikes_before)))&&suppressWarnings(as.numeric(strikes_before))>=2){
             pitches_after_2k(pitches_after_2k()+1)
@@ -15481,18 +15540,17 @@ server <- function(input, output, session) {
   }
   
   v62_current_season_id <- function(org_id=current_org_id()){
-    d <- season_architecture()
-    if(is.null(d) || !is.list(d) || is.null(d$seasons) || nrow(d$seasons)==0) return("")
-    ss <- d$seasons
-    if(!all(c("Organization_ID","Season_ID") %in% names(ss))) return("")
-    hit <- trimws(as.character(ss$Organization_ID))==trimws(org_id)
+    ss <- seasons_directory()
+    if(is.null(ss) || nrow(ss)==0 || !all(c("Organization_ID","Season_ID") %in% names(ss))) return("")
+    hit <- trimws(as.character(ss$Organization_ID))==trimws(as.character(org_id))
     if("Active" %in% names(ss)){
-      active <- toupper(trimws(as.character(ss$Active))) %in% c("TRUE","T","1","YES","Y")
+      active_chr <- toupper(trimws(as.character(ss$Active)))
+      active <- active_chr %in% c("TRUE","T","1","YES","Y","ACTIVE")
       if(any(hit & active,na.rm=TRUE)) hit <- hit & active
     }
     rows <- ss[hit,,drop=FALSE]
     if(nrow(rows)==0) return("")
-    as.character(rows$Season_ID[1])
+    trimws(as.character(rows$Season_ID[1]))
   }
   
   v62_default_entitlements <- function(org_id,season_id=""){
@@ -15585,14 +15643,22 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$entitlements_save,{
-    if(current_user_role()!="Admin"){
-      entitlement_message("Admin role is required to change organization features.")
+    if(!isTRUE(v625_is_platform_admin())){
+      entitlement_message("Platform Admin access is required to change organization features.")
       return()
     }
     tryCatch({
-      ensure_entitlements_sheet()
       headers <- c("Entitlement_ID","Organization_ID","Season_ID","Feature_Key","Enabled","Package","Notes")
-      all_ent <- v60_read_or_empty("Entitlements","A1:G1001",headers)
+      
+      all_ent <- entitlement_cache()
+      if(is.null(all_ent) || !is.data.frame(all_ent)){
+        all_ent <- as.data.frame(setNames(replicate(length(headers),character(0),simplify=FALSE),headers),
+                                 stringsAsFactors=FALSE,check.names=FALSE)
+      }
+      for(h in headers) if(!h %in% names(all_ent)) all_ent[[h]] <- ""
+      all_ent <- all_ent[,headers,drop=FALSE]
+      for(h in headers) all_ent[[h]] <- as.character(all_ent[[h]])
+      
       org <- current_org_id()
       season_id <- v62_current_season_id(org)
       vals <- c(
@@ -15602,17 +15668,34 @@ server <- function(input, output, session) {
         LEADERBOARDS=isTRUE(input$ent_leaderboards),
         TEAM_REPORTS=isTRUE(input$ent_team_reports)
       )
+      
+      pkg <- if(identical(org,"GEORGIA_STATE") &&
+                isTRUE(vals[["HITTING"]]) &&
+                !isTRUE(vals[["PITCHING"]]) &&
+                !isTRUE(vals[["BULLPEN"]]))
+        "Hitting Package" else "Custom"
+      
       for(k in names(vals)){
         row <- data.frame(
-          Entitlement_ID=paste0(org,"_ENT_",k),Organization_ID=org,Season_ID=season_id,
-          Feature_Key=k,Enabled=if(vals[[k]])"TRUE"else"FALSE",
-          Package="Custom",Notes="Saved from V62 Settings",stringsAsFactors=FALSE
+          Entitlement_ID=paste0(org,"_ENT_",k),
+          Organization_ID=org,
+          Season_ID=season_id,
+          Feature_Key=k,
+          Enabled=if(vals[[k]])"TRUE"else"FALSE",
+          Package=pkg,
+          Notes=if(identical(org,"GEORGIA_STATE"))
+            "Georgia State pilot — Hitting package"
+          else
+            "Saved from V62 Settings",
+          stringsAsFactors=FALSE
         )
         all_ent <- v60_upsert_row(all_ent,row,c("Entitlement_ID"))
       }
-      v60_rewrite_sheet("Entitlements","G1001",headers,all_ent)
-      load_entitlements()
-      entitlement_message("Feature access saved.")
+      
+      v60_rewrite_sheet("Entitlements","G5000",headers,all_ent)
+      entitlement_cache(all_ent)
+      entitlement_message(paste0("Feature access saved for ",org,"."))
+      v62_push_feature_access()
     },error=function(e){
       entitlement_message(paste0("Feature access save error: ",e$message))
     })
@@ -15946,6 +16029,662 @@ server <- function(input, output, session) {
     o
   })
   
+  
+  # ==================================================
+  # V62.4 — MULTI-ORGANIZATION USER SWITCHING
+  # ==================================================
+  # Georgia State onboarding exposed a second issue: the importer correctly
+  # wrote the new organization/user/season/roster records, but older startup
+  # readers were capped at the first 101 / 1001 rows. Because the live backend
+  # contains reserved/formatted blank rows, Georgia State landed just beyond
+  # those caps (for example Will Maddox after row 1001). V62.4 widens the small
+  # identity/config reads and makes an organization switch refresh the roster.
+  # No backend rewrite/compaction is performed during startup.
+  
+  load_organizations <- function(){
+    tryCatch({
+      d <- as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,
+          sheet="Organizations",
+          range="A1:I5000",
+          col_names=TRUE
+        ),
+        stringsAsFactors=FALSE
+      )
+      d <- v49_normalize_sheet_data(d,"generic")
+      if(nrow(d)>0 && "Organization_ID" %in% names(d)){
+        ids <- trimws(as.character(d$Organization_ID))
+        d <- d[!is.na(ids) & ids!="" & !toupper(ids)%in%c("NA","N/A","NULL","NONE"),,drop=FALSE]
+      }
+      organizations_directory(d)
+      TRUE
+    },error=function(e){
+      organizations_directory(data.frame())
+      FALSE
+    })
+  }
+  
+  load_user_directory <- function(){
+    tryCatch({
+      d <- as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,
+          sheet="Users",
+          range="A1:F5000",
+          col_names=TRUE
+        ),
+        stringsAsFactors=FALSE
+      )
+      
+      d <- v49_normalize_sheet_data(d,"generic")
+      
+      if(nrow(d)>0 && "User_ID" %in% names(d)){
+        ids <- trimws(as.character(d$User_ID))
+        d <- d[
+          !is.na(ids) & ids!="" & !toupper(ids)%in%c("NA","N/A","NULL","NONE"),
+          ,drop=FALSE
+        ]
+      }
+      
+      if(nrow(d)>0 && "Active" %in% names(d)){
+        active_raw <- d$Active
+        if(is.logical(active_raw)){
+          active_keep <- is.na(active_raw) | active_raw
+        }else{
+          active_chr <- toupper(trimws(as.character(active_raw)))
+          active_keep <- is.na(active_chr) | active_chr=="" |
+            active_chr %in% c("TRUE","T","1","YES","Y","ACTIVE")
+        }
+        d <- d[active_keep,,drop=FALSE]
+      }
+      
+      # One deterministic row per User_ID if the sheet ever contains a retry.
+      if(nrow(d)>0 && "User_ID" %in% names(d)){
+        d <- d[!duplicated(trimws(as.character(d$User_ID))),,drop=FALSE]
+      }
+      
+      user_directory(d)
+      
+      if(nrow(d)>0){
+        display_names <- if("Display_Name" %in% names(d)) trimws(as.character(d$Display_Name)) else trimws(as.character(d$User_ID))
+        roles <- if("Role" %in% names(d)) trimws(as.character(d$Role)) else rep("Coach",nrow(d))
+        orgs <- if("Organization_ID" %in% names(d)) trimws(as.character(d$Organization_ID)) else rep("",nrow(d))
+        
+        # Include organization in the development selector now that multiple
+        # teams can coexist. This is development-only identity switching, not
+        # production authentication.
+        labs <- paste0(display_names," — ",roles," — ",orgs)
+        vals <- as.character(d$User_ID)
+        names(vals) <- labs
+        
+        cur <- active_user_id()
+        if(is.null(cur) || !nzchar(cur) || !cur %in% vals){
+          default_name <- trimws(setting_chr("Default_Charting_User","Nate Marko"))
+          hit <- which(trimws(display_names)==default_name)
+          cur <- if(length(hit)>0) as.character(d$User_ID[hit[1]]) else as.character(d$User_ID[1])
+          active_user_id(cur)
+        }
+        
+        updateSelectInput(
+          session,
+          "setting_active_user",
+          choices=vals,
+          selected=active_user_id()
+        )
+      }else{
+        active_user_id("")
+        updateSelectInput(
+          session,
+          "setting_active_user",
+          choices=c("No active users"=""),
+          selected=""
+        )
+      }
+      
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Users load error: ",e$message))
+      FALSE
+    })
+  }
+  
+  load_season_architecture <- function(){
+    tryCatch({
+      org <- current_org_id()
+      
+      s <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F5000",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(s)>0 && "Season_ID"%in%names(s)){
+        sid <- trimws(as.character(s$Season_ID))
+        s <- s[!is.na(sid) & sid!="" & !toupper(sid)%in%c("NA","N/A","NULL","NONE"),,drop=FALSE]
+      }
+      if(nrow(s)>0 && "Organization_ID"%in%names(s)) s <- s[trimws(as.character(s$Organization_ID))==org,,drop=FALSE]
+      seasons_directory(s)
+      
+      p <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I5000",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(p)>0 && "Period_ID"%in%names(p)){
+        pid <- trimws(as.character(p$Period_ID))
+        p <- p[!is.na(pid) & pid!="" & !toupper(pid)%in%c("NA","N/A","NULL","NONE"),,drop=FALSE]
+      }
+      if(nrow(p)>0 && "Organization_ID"%in%names(p)) p <- p[trimws(as.character(p$Organization_ID))==org,,drop=FALSE]
+      periods_directory(p)
+      
+      sub <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G5000",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(sub)>0 && "Subscription_ID"%in%names(sub)){
+        sid <- trimws(as.character(sub$Subscription_ID))
+        sub <- sub[!is.na(sid) & sid!="" & !toupper(sid)%in%c("NA","N/A","NULL","NONE"),,drop=FALSE]
+      }
+      if(nrow(sub)>0 && "Organization_ID"%in%names(sub)) sub <- sub[trimws(as.character(sub$Organization_ID))==org,,drop=FALSE]
+      subscriptions_directory(sub)
+      
+      rm <- v49_normalize_sheet_data(as.data.frame(
+        googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H10000",col_names=TRUE),
+        stringsAsFactors=FALSE
+      ),"generic")
+      if(nrow(rm)>0 && "Roster_Membership_ID"%in%names(rm)){
+        rid <- trimws(as.character(rm$Roster_Membership_ID))
+        rm <- rm[!is.na(rid) & rid!="" & !toupper(rid)%in%c("NA","N/A","NULL","NONE"),,drop=FALSE]
+      }
+      if(nrow(rm)>0 && "Organization_ID"%in%names(rm)) rm <- rm[trimws(as.character(rm$Organization_ID))==org,,drop=FALSE]
+      roster_memberships_directory(rm)
+      
+      if(nrow(s)>0 && "Season_ID"%in%names(s)){
+        vals <- trimws(as.character(s$Season_ID))
+        keep <- !is.na(vals) & vals!=""
+        vals <- vals[keep]
+        labs <- if("Season_Name"%in%names(s)) trimws(as.character(s$Season_Name[keep])) else vals
+        bad <- is.na(labs) | labs==""
+        labs[bad] <- vals[bad]
+        names(vals) <- labs
+        vals <- vals[!duplicated(vals)]
+        if(length(vals)>0){
+          updateSelectInput(session,"sessions_new_season",choices=vals,selected=unname(vals[1]))
+          if("new_session_season"%in%names(input)){
+            updateSelectInput(session,"new_session_season",choices=vals,selected=unname(vals[1]))
+          }
+        }
+      }
+      
+      initialize_roster_management_from_cache()
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Season architecture load error: ",e$message))
+      FALSE
+    })
+  }
+  
+  load_entitlements <- function(){
+    tryCatch({
+      d <- as.data.frame(
+        googlesheets4::range_read(
+          ss=SHEET_URL,sheet="Entitlements",range="A1:G5000",col_names=TRUE
+        ),stringsAsFactors=FALSE
+      )
+      d <- v49_normalize_sheet_data(d,"generic")
+      if(nrow(d)>0 && "Entitlement_ID"%in%names(d)){
+        eid <- trimws(as.character(d$Entitlement_ID))
+        d <- d[!is.na(eid) & eid!="" & !toupper(eid)%in%c("NA","N/A","NULL","NONE"),,drop=FALSE]
+      }
+      entitlement_cache(d)
+      TRUE
+    },error=function(e){
+      entitlement_cache(data.frame())
+      FALSE
+    })
+  }
+  
+  
+  
+  # ==================================================
+  # V62.6.5 — PLAYER SCHEMA NORMALIZATION
+  # ==================================================
+  # The Players sheet currently contains two historical row layouts:
+  #
+  # LaGrange legacy rows:
+  #   Class            -> actual Primary_Position
+  #   Primary_Position -> actual Player_Type
+  #   Throws           -> actual Class
+  #   Player_Type      -> legacy batting/throwing value or blank
+  #
+  # Georgia State imported rows:
+  #   Class            -> actual Bats
+  #   Primary_Position -> actual Throws
+  #   Throws           -> actual Player_Type
+  #
+  # Normalize both layouts in memory so all charting/report code receives the
+  # canonical schema without rewriting historical backend rows.
+  
+  v6265_normalize_player_schema <- function(d){
+    d <- v49_normalize_sheet_data(as.data.frame(d,stringsAsFactors=FALSE),"generic")
+    if(nrow(d)==0) return(d)
+    
+    needed <- c(
+      "Player_ID","Organization_ID","First_Name","Last_Name","Display_Name",
+      "Jersey_Number","Class","Primary_Position","Bats","Throws","Player_Type","Active"
+    )
+    for(nm in needed) if(!nm %in% names(d)) d[[nm]] <- ""
+    
+    chr <- function(x){
+      y <- as.character(x)
+      y[is.na(y)] <- ""
+      trimws(y)
+    }
+    
+    for(nm in needed) d[[nm]] <- chr(d[[nm]])
+    
+    valid_type <- function(x){
+      tolower(chr(x)) %in% c("hitter","pitcher","two-way","two way","twoway")
+    }
+    handed <- function(x){
+      toupper(chr(x)) %in% c("R","L","S")
+    }
+    class_like <- function(x){
+      toupper(chr(x)) %in% c(
+        "FR","SO","JR","SR","RSO","RJR","RSR","5TH",
+        "FRESHMAN","SOPHOMORE","JUNIOR","SENIOR"
+      )
+    }
+    
+    # Row-wise because the backend legitimately contains multiple historical
+    # layouts at the same time.
+    for(i in seq_len(nrow(d))){
+      current_type <- chr(d$Player_Type[i])
+      
+      if(valid_type(current_type)) next
+      
+      # Layout A — LaGrange legacy:
+      # Primary_Position contains Hitter/Pitcher/Two-Way.
+      if(valid_type(d$Primary_Position[i])){
+        old_class <- chr(d$Class[i])
+        old_primary <- chr(d$Primary_Position[i])
+        old_throws <- chr(d$Throws[i])
+        old_player_type <- chr(d$Player_Type[i])
+        
+        d$Player_Type[i] <- old_primary
+        
+        # Column G is the real baseball position in this legacy layout.
+        if(nzchar(old_class)) d$Primary_Position[i] <- old_class
+        
+        # Column J is the real class/year when it looks like one.
+        if(class_like(old_throws)) d$Class[i] <- old_throws
+        
+        # Some legacy hitter rows stored a handedness value in Player_Type.
+        # Preserve it as Throws only when it is actually usable.
+        if(handed(old_player_type)) d$Throws[i] <- toupper(old_player_type)
+        
+        next
+      }
+      
+      # Layout B — Georgia State onboarding:
+      # Throws contains Hitter/Pitcher/Two-Way, while Class/Primary_Position
+      # hold Bats/Throws respectively.
+      if(valid_type(d$Throws[i])){
+        old_class <- chr(d$Class[i])
+        old_primary <- chr(d$Primary_Position[i])
+        old_throws <- chr(d$Throws[i])
+        
+        d$Player_Type[i] <- old_throws
+        
+        if(handed(old_class)) d$Bats[i] <- toupper(old_class)
+        if(handed(old_primary)) d$Throws[i] <- toupper(old_primary)
+        
+        # No class or baseball position was supplied in the Georgia State file,
+        # so do not display L/R as those fields.
+        d$Class[i] <- ""
+        d$Primary_Position[i] <- ""
+        
+        next
+      }
+    }
+    
+    d
+  }
+  
+  # ==================================================
+  # V62.6.4 — SEASON ROSTER AS LIVE CHARTING SOURCE OF TRUTH
+  # ==================================================
+  # Live Charting should not decide availability from Players$Organization_ID.
+  # Availability comes from:
+  # active organization -> active season -> ACTIVE Roster_Memberships -> Players.
+  #
+  # This preserves permanent player identities/history while controlling who is
+  # actually available to chart in a given baseball year.
+  
+  v6264_active_season_id <- function(){
+    ss <- seasons_directory()
+    if(is.null(ss) || !is.data.frame(ss) || nrow(ss)==0 || !"Season_ID"%in%names(ss)) return("")
+    
+    # seasons_directory() is already scoped to current_org_id() by the cached
+    # architecture loader. Prefer an explicitly active season if available.
+    if("Active"%in%names(ss)){
+      a <- toupper(trimws(as.character(ss$Active)))
+      hit <- a %in% c("TRUE","T","1","YES","Y","ACTIVE")
+      if(any(hit,na.rm=TRUE)){
+        sid <- trimws(as.character(ss$Season_ID[which(hit)[1]]))
+        if(!is.na(sid) && nzchar(sid)) return(sid)
+      }
+    }
+    
+    sid <- trimws(as.character(ss$Season_ID[1]))
+    if(is.na(sid)) "" else sid
+  }
+  
+  v6264_roster_player_ids <- function(){
+    rm <- roster_memberships_directory()
+    sid <- v6264_active_season_id()
+    
+    if(is.null(rm) || !is.data.frame(rm) || nrow(rm)==0 ||
+       !all(c("Season_ID","Player_ID")%in%names(rm)) || !nzchar(sid)){
+      return(character(0))
+    }
+    
+    season_col <- trimws(as.character(rm$Season_ID))
+    player_col <- trimws(as.character(rm$Player_ID))
+    
+    status_ok <- rep(TRUE,nrow(rm))
+    if("Status"%in%names(rm)){
+      status_col <- toupper(trimws(as.character(rm$Status)))
+      status_ok <- status_col %in% c("ACTIVE","TRUE","T","1","YES","Y")
+    }
+    
+    good <- !is.na(season_col) & season_col==sid &
+      !is.na(player_col) & nzchar(player_col) &
+      !toupper(player_col)%in%c("NA","N/A","NULL","NONE") &
+      status_ok
+    
+    unique(player_col[good])
+  }
+  
+  v6264_scope_players_to_active_roster <- function(players_data){
+    d <- v6265_normalize_player_schema(players_data)
+    if(nrow(d)==0 || !"Player_ID"%in%names(d)) return(d[0,,drop=FALSE])
+    
+    pid <- trimws(as.character(d$Player_ID))
+    valid <- !is.na(pid) & nzchar(pid) & !toupper(pid)%in%c("NA","N/A","NULL","NONE")
+    d <- d[valid,,drop=FALSE]
+    pid <- trimws(as.character(d$Player_ID))
+    
+    roster_ids <- v6264_roster_player_ids()
+    
+    # Primary path: season-specific ACTIVE roster memberships.
+    if(length(roster_ids)>0){
+      return(d[pid %in% roster_ids,,drop=FALSE])
+    }
+    
+    # Safe fallback for legacy organizations that have not yet been migrated.
+    if("Organization_ID"%in%names(d)){
+      org <- trimws(as.character(d$Organization_ID))
+      return(d[!is.na(org) & org==current_org_id(),,drop=FALSE])
+    }
+    
+    d[0,,drop=FALSE]
+  }
+  
+  v6264_refresh_live_player_choices <- function(){
+    d <- v6265_normalize_player_schema(player_lookup())
+    
+    if(is.null(d) || !is.data.frame(d) || nrow(d)==0){
+      updateSelectInput(session,"batter",choices=c("No Active Hitters"=""),selected="")
+      updateSelectInput(session,"pitcher",choices=c("No Active Pitchers"=""),selected="")
+      return(invisible(FALSE))
+    }
+    
+    for(nm in c("Player_ID","Display_Name","First_Name","Last_Name","Primary_Position","Player_Type","Active")){
+      if(!nm %in% names(d)) d[[nm]] <- ""
+    }
+    
+    # Membership determines roster eligibility. Players$Active is still respected
+    # when it contains a meaningful value, but blanks do not eliminate a valid
+    # season-roster member.
+    active_raw <- tolower(trimws(as.character(d$Active)))
+    has_active_value <- !is.na(active_raw) & nzchar(active_raw)
+    active_flag <- !has_active_value | active_raw %in% c("true","1","yes","y","active")
+    d <- d[active_flag,,drop=FALSE]
+    
+    make_choices <- function(x){
+      if(nrow(x)==0) return(character(0))
+      nm <- trimws(as.character(x$Display_Name))
+      fallback <- trimws(paste(as.character(x$First_Name),as.character(x$Last_Name)))
+      bad <- is.na(nm) | nm==""
+      nm[bad] <- fallback[bad]
+      
+      pos <- trimws(as.character(x$Primary_Position))
+      lab <- ifelse(is.na(pos) | pos=="",nm,paste0(nm," — ",pos))
+      
+      vals <- trimws(as.character(x$Player_ID))
+      keep <- !is.na(vals) & nzchar(vals)
+      vals <- vals[keep]
+      names(vals) <- lab[keep]
+      vals
+    }
+    
+    type_l <- tolower(trimws(as.character(d$Player_Type)))
+    batter_rows <- type_l %in% c("hitter","two-way","two way","twoway")
+    pitcher_rows <- type_l %in% c("pitcher","two-way","two way","twoway")
+    
+    batter_choices <- make_choices(d[batter_rows,,drop=FALSE])
+    pitcher_choices <- make_choices(d[pitcher_rows,,drop=FALSE])
+    
+    if(length(batter_choices)>0){
+      current_b <- isolate(input$batter)
+      selected_b <- if(!is.null(current_b) && length(current_b)>0 &&
+                       current_b %in% unname(batter_choices)) current_b else unname(batter_choices[[1]])
+      updateSelectInput(session,"batter",choices=batter_choices,selected=selected_b)
+      updateSelectInput(session,"report_batter",choices=batter_choices,selected=selected_b)
+    } else {
+      updateSelectInput(session,"batter",choices=c("No Active Hitters"=""),selected="")
+    }
+    
+    if(length(pitcher_choices)>0){
+      current_p <- isolate(input$pitcher)
+      selected_p <- if(!is.null(current_p) && length(current_p)>0 &&
+                       current_p %in% unname(pitcher_choices)) current_p else unname(pitcher_choices[[1]])
+      updateSelectInput(session,"pitcher",choices=pitcher_choices,selected=selected_p)
+      updateSelectInput(session,"pitcher_report_pitcher",choices=pitcher_choices,selected=selected_p)
+    } else {
+      updateSelectInput(session,"pitcher",choices=c("No Active Pitchers"=""),selected="")
+    }
+    
+    invisible(TRUE)
+  }
+  
+  
+  # Refresh once the startup caches finish loading, regardless of whether
+  # Players or Roster_Memberships arrived first.
+  observeEvent(
+    list(player_lookup(),roster_memberships_directory(),seasons_directory()),
+    {
+      v6264_refresh_live_player_choices()
+    },
+    ignoreInit=FALSE
+  )
+  
+  # The older file contains two input observers for the development user. The
+  # first one updates active_user_id() before the second can refresh players.
+  # Listening to active_user_id() itself guarantees the new organization's
+  # roster is loaded after the identity actually changes.
+  observeEvent(active_user_id(),{
+    uid <- active_user_id()
+    if(is.null(uid) || !nzchar(uid)) return()
+    
+    tryCatch({
+      # V62.6.4: this is now an in-memory organization re-scope because
+      # V62.6.2 caches the architecture tables after first load.
+      load_season_architecture()
+      
+      players_data <- gs_read_players(sheet_url=SHEET_URL)
+      players_data <- v6264_scope_players_to_active_roster(players_data)
+      
+      player_lookup(players_data)
+      v6264_refresh_live_player_choices()
+    },error=function(e){
+      settings_message(paste0("Organization roster switch error: ",e$message))
+    })
+    
+    # V62.6.2: architecture + entitlements are already handled elsewhere.
+    # Avoid duplicate Google Sheets reads during identity switching.
+    u <- current_user_row()
+    if(nrow(u)>0 && "Display_Name"%in%names(u)){
+      updateTextInput(session,"charting_user",value=as.character(u$Display_Name[1]))
+    }
+  },ignoreInit=TRUE)
+  
+  
+  # ==================================================
+  # V62.6.2 — CACHED MULTI-ORG ARCHITECTURE
+  # ==================================================
+  v6262_all_seasons <- reactiveVal(NULL)
+  v6262_all_periods <- reactiveVal(NULL)
+  v6262_all_subscriptions <- reactiveVal(NULL)
+  v6262_all_roster_memberships <- reactiveVal(NULL)
+  
+  v6262_clean_arch <- function(d,id_col){
+    d <- v49_normalize_sheet_data(as.data.frame(d,stringsAsFactors=FALSE),"generic")
+    if(nrow(d)>0 && id_col %in% names(d)){
+      id <- trimws(as.character(d[[id_col]]))
+      d <- d[!is.na(id) & id!="" & !toupper(id)%in%c("NA","N/A","NULL","NONE"),,drop=FALSE]
+    }
+    d
+  }
+  
+  v6262_refresh_architecture_cache <- function(force=FALSE){
+    have_all <- !is.null(v6262_all_seasons()) &&
+      !is.null(v6262_all_periods()) &&
+      !is.null(v6262_all_subscriptions()) &&
+      !is.null(v6262_all_roster_memberships())
+    
+    if(have_all && !isTRUE(force)) return(invisible(TRUE))
+    
+    v6262_all_seasons(v6262_clean_arch(
+      googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F5000",col_names=TRUE),
+      "Season_ID"
+    ))
+    v6262_all_periods(v6262_clean_arch(
+      googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I5000",col_names=TRUE),
+      "Period_ID"
+    ))
+    v6262_all_subscriptions(v6262_clean_arch(
+      googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G5000",col_names=TRUE),
+      "Subscription_ID"
+    ))
+    v6262_all_roster_memberships(v6262_clean_arch(
+      googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H10000",col_names=TRUE),
+      "Roster_Membership_ID"
+    ))
+    invisible(TRUE)
+  }
+  
+  load_season_architecture <- function(){
+    tryCatch({
+      org <- current_org_id()
+      v6262_refresh_architecture_cache(FALSE)
+      
+      all_s <- v6262_all_seasons()
+      if(!is.null(all_s) && nrow(all_s)>0 && "Organization_ID" %in% names(all_s)){
+        if(!org %in% trimws(as.character(all_s$Organization_ID))){
+          v6262_refresh_architecture_cache(TRUE)
+        }
+      }
+      
+      s <- v6262_all_seasons()
+      p <- v6262_all_periods()
+      sub <- v6262_all_subscriptions()
+      rm <- v6262_all_roster_memberships()
+      
+      if(is.null(s)) s <- data.frame()
+      if(is.null(p)) p <- data.frame()
+      if(is.null(sub)) sub <- data.frame()
+      if(is.null(rm)) rm <- data.frame()
+      
+      if(nrow(s)>0 && "Organization_ID"%in%names(s))
+        s <- s[trimws(as.character(s$Organization_ID))==org,,drop=FALSE]
+      if(nrow(p)>0 && "Organization_ID"%in%names(p))
+        p <- p[trimws(as.character(p$Organization_ID))==org,,drop=FALSE]
+      if(nrow(sub)>0 && "Organization_ID"%in%names(sub))
+        sub <- sub[trimws(as.character(sub$Organization_ID))==org,,drop=FALSE]
+      if(nrow(rm)>0 && "Organization_ID"%in%names(rm))
+        rm <- rm[trimws(as.character(rm$Organization_ID))==org,,drop=FALSE]
+      
+      seasons_directory(s)
+      periods_directory(p)
+      subscriptions_directory(sub)
+      roster_memberships_directory(rm)
+      
+      if(nrow(s)>0 && "Season_ID"%in%names(s)){
+        vals <- trimws(as.character(s$Season_ID))
+        keep <- !is.na(vals) & vals!=""
+        vals <- vals[keep]
+        labs <- if("Season_Name"%in%names(s)) trimws(as.character(s$Season_Name[keep])) else vals
+        bad <- is.na(labs) | labs==""
+        labs[bad] <- vals[bad]
+        names(vals) <- labs
+        vals <- vals[!duplicated(vals)]
+        if(length(vals)>0){
+          updateSelectInput(session,"sessions_new_season",choices=vals,selected=unname(vals[1]))
+          if("new_session_season"%in%names(input)){
+            updateSelectInput(session,"new_session_season",choices=vals,selected=unname(vals[1]))
+          }
+        }
+      }
+      
+      initialize_roster_management_from_cache()
+      TRUE
+    },error=function(e){
+      settings_message(paste0("Season architecture load error: ",e$message))
+      FALSE
+    })
+  }
+  
+  # ==================================================
+  # V62.5 — PLATFORM ADMIN + ENTITLEMENT SAVE FIX
+  # ==================================================
+  # Separate platform ownership from organization roles. Nate's development
+  # identity is the only Platform Admin in this pre-authentication build.
+  # Organization admins/coaches can use purchased modules but cannot change
+  # packages, entitlements, or onboard another organization.
+  
+  v625_is_platform_admin <- reactive({
+    isTRUE(platform_owner_session())
+  })
+  
+  # V62's original helper referenced a removed season_architecture() object.
+  # Resolve the active season directly from the season directory that is
+  # already loaded for the current organization.
+  v62_current_season_id <- function(org_id=current_org_id()){
+    ss <- seasons_directory()
+    if(is.null(ss) || nrow(ss)==0 || !all(c("Organization_ID","Season_ID") %in% names(ss))) return("")
+    hit <- trimws(as.character(ss$Organization_ID))==trimws(as.character(org_id))
+    if("Active" %in% names(ss)){
+      active_chr <- toupper(trimws(as.character(ss$Active)))
+      active <- active_chr %in% c("TRUE","T","1","YES","Y","ACTIVE")
+      if(any(hit & active,na.rm=TRUE)) hit <- hit & active
+    }
+    rows <- ss[hit,,drop=FALSE]
+    if(nrow(rows)==0) return("")
+    trimws(as.character(rows$Season_ID[1]))
+  }
+  
+  v625_push_platform_admin_access <- function(){
+    session$sendCustomMessage(
+      "v625PlatformAdminAccess",
+      list(platform_admin=isTRUE(v625_is_platform_admin()))
+    )
+  }
+  
+  # Push owner-only card visibility whenever the development identity changes.
+  observeEvent(active_user_id(),{
+    v625_push_platform_admin_access()
+  },ignoreInit=FALSE)
+  
   # ==================================================
   # STARTUP INITIALIZATION
   # ==================================================
@@ -15960,6 +16699,11 @@ server <- function(input, output, session) {
     load_app_settings(update_ui=TRUE)
     load_organizations()
     load_user_directory()
+    
+    if(identical(trimws(as.character(active_user_id())),"LAGRANGE_USER_NATE_MARKO")){
+      platform_owner_session(TRUE)
+    }
+    
     load_season_architecture()
     load_entitlements()
     
