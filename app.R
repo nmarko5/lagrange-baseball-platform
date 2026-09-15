@@ -2004,7 +2004,8 @@ ui <- fluidPage(
         ),
         column(
           width=6,
-          selectInput("pitcher","Pitcher",choices=NULL)
+          selectInput("pitcher","Pitcher",choices=NULL),
+          conditionalPanel(condition="input.charting_mode == 'Bullpen'",uiOutput("bullpen_live_pitch_counter"))
         )
       ),
       
@@ -2684,13 +2685,13 @@ ui <- fluidPage(
           div(class = "leaderboard-title", "Team Leaderboard"),
           div(
             class = "leaderboard-filter-grid",
-            selectInput("leaderboard_type","Leaderboard",choices=c("Hitters"="Hitter","Pitchers"="Pitcher"),selected="Hitter"),
+            selectInput("leaderboard_type","Leaderboard",choices=c("Hitters"="Hitter","Pitchers — Game"="Pitcher","Bullpen"="Bullpen"),selected="Hitter"),
             selectInput("leaderboard_rank_metric","Leaderboard Stat",choices=c("Overall Grade"="Overall_Grade"),selected="Overall_Grade"),
             selectInput("leaderboard_session","Session",choices=c("All Sessions (Cumulative)"="ALL"),selected="ALL"),
             dateRangeInput("leaderboard_date_range","Date Range",start=Sys.Date()-365,end=Sys.Date()),
             actionButton("leaderboard_refresh","REFRESH")
           ),
-          div(class="leaderboard-note","Green = better than the player-weighted team/staff average • Yellow = near average • Red = below average. Click a player name to jump directly to that player's full report.")
+          div(class="leaderboard-note","Hitters and Pitchers — Game use live/game data. Bullpen is separate and ranks bullpen-only command performance. Green = better than the team/staff average • Yellow = near average • Red = below average. Click a player name to jump to the full report.")
         ),
         uiOutput("leaderboard_quab_definition"),
         div(class="leaderboard-podium-card",div(class="leaderboard-podium-title","Top 3"),uiOutput("leaderboard_podium")),
@@ -3472,6 +3473,17 @@ server <- function(input, output, session) {
   pa_number <- reactiveVal(1)
   pa_pitch_count <- reactiveVal(0)
   pitches_after_2k <- reactiveVal(0)
+  
+  # V62.6.6 — live bullpen pitch counter
+  bullpen_live_pitch_count <- reactiveVal(0L)
+  output$bullpen_live_pitch_counter <- renderUI({
+    n<-suppressWarnings(as.integer(bullpen_live_pitch_count()));if(!is.finite(n))n<-0L
+    div(style="margin-top:-4px;margin-bottom:8px;padding:8px 12px;border:1px solid #e1e1e1;border-radius:7px;background:#fafafa;display:flex;align-items:center;justify-content:space-between;",
+        tags$span(style="font-size:12px;font-weight:900;color:#A7191F;text-transform:uppercase;","Bullpen Pitch Count"),
+        tags$span(style="font-size:28px;font-weight:900;color:#222;line-height:1;",as.character(n)))
+  })
+  observeEvent(input$pitcher,{if(identical(input$charting_mode,"Bullpen"))bullpen_live_pitch_count(0L)},ignoreInit=TRUE)
+  observeEvent(input$charting_mode,{if(identical(input$charting_mode,"Bullpen"))bullpen_live_pitch_count(0L)},ignoreInit=TRUE)
   
   client_instance_id <- paste0(
     format(Sys.time(), "%Y%m%d%H%M%OS3"),
@@ -7435,8 +7447,15 @@ server <- function(input, output, session) {
     "Medium Contact Allowed %"="Medium_Contact_Pct",
     "Soft Contact Allowed %"="Soft_Contact_Pct"
   )
+  lb_bullpen_metric_choices <- c(
+    "Command Grade"="Command_Grade","Execution Quality"="Execution_Quality",
+    "Competitive %"="Competitive_Pct","Strike %"="Strike_Pct","Zone %"="Zone_Pct",
+    "Dot %"="Dot_Pct","Executed or Better %"="Executed_Pct",
+    "Avg Miss Distance"="Avg_Miss","Pitches"="Pitches","Bullpen Sessions"="Bullpens"
+  )
+  
   observeEvent(input$leaderboard_type,{
-    ch<-if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_metric_choices else lb_hitter_metric_choices
+    ch<-if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_metric_choices else if(identical(input$leaderboard_type,"Bullpen"))lb_bullpen_metric_choices else lb_hitter_metric_choices
     updateSelectInput(session,"leaderboard_rank_metric",choices=ch,selected=unname(ch[1]))
   },ignoreInit=FALSE)
   
@@ -7480,9 +7499,93 @@ server <- function(input, output, session) {
     }))
   })
   
-  lb_rows<-reactive({if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_rows()else lb_hitter_rows()})
+  # ==================================================
+  # V62.6.7 — ROBUST BULLPEN LEADERBOARD NAME RESOLUTION
+  # ==================================================
+  # Keep Player_ID internal. The leaderboard should always prefer a human-
+  # readable player name, even when the normal lb_name() lookup misses a
+  # legacy/historical player row.
+  v6267_bullpen_player_name <- function(player_id){
+    id <- trimws(as.character(player_id)[1])
+    if(is.na(id) || !nzchar(id)) return("Unknown Player")
+    
+    # First use the platform's normal leaderboard resolver.
+    normal <- tryCatch(lb_name(id),error=function(e)"")
+    normal <- trimws(as.character(normal)[1])
+    
+    # A successful lookup should not simply echo the raw Player_ID.
+    if(!is.na(normal) && nzchar(normal) && !identical(normal,id)){
+      return(normal)
+    }
+    
+    # Second path: current normalized player lookup.
+    d <- tryCatch(v6265_normalize_player_schema(player_lookup()),error=function(e)data.frame())
+    if(is.data.frame(d) && nrow(d)>0 && "Player_ID"%in%names(d)){
+      hit <- which(trimws(as.character(d$Player_ID))==id)
+      if(length(hit)>0){
+        i <- hit[1]
+        
+        if("Display_Name"%in%names(d)){
+          nm <- trimws(as.character(d$Display_Name[i]))
+          if(!is.na(nm) && nzchar(nm)) return(nm)
+        }
+        
+        first <- if("First_Name"%in%names(d)) trimws(as.character(d$First_Name[i])) else ""
+        last  <- if("Last_Name"%in%names(d)) trimws(as.character(d$Last_Name[i])) else ""
+        nm <- trimws(paste(first,last))
+        if(nzchar(nm)) return(nm)
+      }
+    }
+    
+    # Final safe fallback: convert our structured Player_ID to readable text
+    # rather than exposing LAGRANGE_HAVEN_ADAMS in the UI.
+    pretty <- id
+    org_prefix <- paste0("^",gsub("([\\\\W])","\\\\\\\\\\1",current_org_id()),"_")
+    pretty <- sub(org_prefix,"",pretty,ignore.case=TRUE)
+    pretty <- gsub("^PLAYER_","",pretty,ignore.case=TRUE)
+    pretty <- gsub("_"," ",pretty,fixed=TRUE)
+    pretty <- tools::toTitleCase(tolower(trimws(pretty)))
+    if(nzchar(pretty)) pretty else id
+  }
+  
+  leaderboard_bullpen_pitches<-reactive({
+    d<-pitcher_report_pitches_raw()
+    if(is.null(d)||!is.data.frame(d)||nrow(d)==0)return(data.frame())
+    lb_filter_frame(bullpen_valid_rows(d))
+  })
+  
+  lb_bullpen_rows<-reactive({
+    p<-leaderboard_bullpen_pitches()
+    if(nrow(p)==0||!"Pitcher_ID"%in%names(p))return(data.frame())
+    ids<-unique(trimws(as.character(p$Pitcher_ID)));ids<-ids[!is.na(ids)&ids!=""]
+    rows<-lapply(ids,function(id){
+      pd<-p[trimws(as.character(p$Pitcher_ID))==id,,drop=FALSE]
+      rel<-bullpen_relative_frame(pd)
+      if(nrow(pd)==0||nrow(rel)==0)return(NULL)
+      strike<-as.character(pd$Pitch_Result)%in%c("Called Strike","Strike")
+      zone<-if("Zone_Group"%in%names(pd))as.character(pd$Zone_Group)%in%c("Heart","Shadow")else rep(FALSE,nrow(pd))
+      avg_miss<-mean(rel$Miss_In,na.rm=TRUE)
+      execution_quality<-mean(vapply(rel$Miss_In,bullpen_execution_quality_score,numeric(1)),na.rm=TRUE)
+      competitive<-mean(rel$Miss_In<=bullpen_execution_boundaries()["competitive"],na.rm=TRUE)
+      dot<-mean(rel$Miss_In<=bullpen_execution_boundaries()["dot"],na.rm=TRUE)
+      executed<-mean(rel$Miss_In<=bullpen_execution_boundaries()["executed"],na.rm=TRUE)
+      strike_pct<-mean(strike,na.rm=TRUE);zone_pct<-mean(zone,na.rm=TRUE)
+      command<-bullpen_command_grade_v2(execution_quality,avg_miss,zone_pct,strike_pct)
+      bullpens<-if("Session_ID"%in%names(pd))length(unique(as.character(pd$Session_ID[!is.na(pd$Session_ID)&as.character(pd$Session_ID)!=""])))else NA_real_
+      data.frame(Player_ID=id,Player=v6267_bullpen_player_name(id),Command_Grade=command,Execution_Quality=execution_quality,
+                 Competitive_Pct=competitive,Strike_Pct=strike_pct,Zone_Pct=zone_pct,Dot_Pct=dot,
+                 Executed_Pct=executed,Avg_Miss=avg_miss,Pitches=nrow(pd),Bullpens=bullpens,stringsAsFactors=FALSE)
+    })
+    rows<-Filter(Negate(is.null),rows);if(length(rows)==0)return(data.frame());do.call(rbind,rows)
+  })
+  
+  lb_rows<-reactive({
+    if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_rows()
+    else if(identical(input$leaderboard_type,"Bullpen"))lb_bullpen_rows()
+    else lb_hitter_rows()
+  })
   lb_higher<-function(metric){
-    lower<-c("Chase_Pct","Whiff_Pct","K_Pct","Behind_Pct","Avg_Pitches_Inning","BB_Pct","HR_Pct","Opp_AVG","Opp_OBP","Opp_SLG","Hard_Contact_Pct","Medium_Contact_Pct")
+    lower<-c("Chase_Pct","Whiff_Pct","K_Pct","Behind_Pct","Avg_Pitches_Inning","BB_Pct","HR_Pct","Opp_AVG","Opp_OBP","Opp_SLG","Hard_Contact_Pct","Medium_Contact_Pct","Avg_Miss")
     if(identical(input$leaderboard_type,"Pitcher"))lower<-setdiff(lower,c("Whiff_Pct","Chase_Pct"))
     !metric%in%lower
   }
@@ -7490,9 +7593,11 @@ server <- function(input, output, session) {
   lb_class<-function(v,a,m){v<-suppressWarnings(as.numeric(v));a<-suppressWarnings(as.numeric(a));if(!is.finite(v)||!is.finite(a))return("leaderboard-neutral");tol<-if(grepl("Grade$",m))2 else .02;d<-if(lb_higher(m))v-a else a-v;if(d>tol)"leaderboard-good"else if(d< -tol)"leaderboard-poor"else"leaderboard-average"}
   lb_display<-function(m,v){
     if(m%in%c("Overall_Grade","Pre2K_Grade","TwoK_Grade","Decision_Quality","Command_Grade","Miss_Grade","Efficiency_Grade"))return(lb_grade_fmt(v))
+    if(m=="Execution_Quality"){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"N/A"else sprintf("%.1f",v))}
+    if(m=="Avg_Miss"){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"N/A"else paste0(sprintf("%.1f",v)," in"))}
     if(m%in%c("AVG","OBP","SLG","OPS","BABIP","Opp_AVG","Opp_OBP","Opp_SLG"))return(lb_avg_fmt(v))
     if(m=="Contact_Quality_Score"){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"N/A"else paste0(ifelse(v>0,"+",""),sprintf("%.2f",v)))}
-    counts<-c("PA","AB","Hits","SO","BB","HBP","RBI","Pitches","BF","G","K","HR","QUABs","QUAB_Hit","QUAB_BBHBP","QUAB_RBI","QUAB_8Pitch","QUAB_4After2K","QUAB_Barrel","QUAB_Offensive","QUAB_MoveThird","QUAB_Error")
+    counts<-c("PA","AB","Hits","SO","BB","HBP","RBI","Pitches","BF","G","K","HR","Bullpens","QUABs","QUAB_Hit","QUAB_BBHBP","QUAB_RBI","QUAB_8Pitch","QUAB_4After2K","QUAB_Barrel","QUAB_Offensive","QUAB_MoveThird","QUAB_Error")
     if(m%in%counts){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"0"else as.character(as.integer(round(v))))}
     if(m=="Avg_Pitches_Inning"){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"N/A"else sprintf("%.1f",v))}
     lb_pct(v)
@@ -7510,7 +7615,7 @@ server <- function(input, output, session) {
   
   output$leaderboard_quab_definition<-renderUI({if(!identical(input$leaderboard_type,"Hitter")||!input$leaderboard_rank_metric%in%c("QUAB_Pct","QUABs","QUAB_8Pitch","QUAB_4After2K","QUAB_Barrel","QUAB_Offensive","QUAB_MoveThird","QUAB_Error"))return(NULL);div(class="leaderboard-quab-card",tags$strong("QUAB = Quality At-Bat. "),"A plate appearance counts as one QUAB when it meets at least one of the following: Hit • Walk/HBP • RBI • 8+ pitch PA • 4+ pitches after reaching two strikes • Barrel • any successful offensive play • move a runner to third with fewer than two outs • reach base on an error.",div(class="leaderboard-note","A PA can satisfy multiple criteria, but it counts as only one QUAB. QUAB % = QUABs ÷ plate appearances. Barrel is defined here as any ball charted with Hard contact. Successful-offensive-play and runner-to-third remain manual context tags."))})
   output$leaderboard_table_title<-renderText({
-    ch<-if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_metric_choices else lb_hitter_metric_choices
+    ch<-if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_metric_choices else if(identical(input$leaderboard_type,"Bullpen"))lb_bullpen_metric_choices else lb_hitter_metric_choices
     m<-input$leaderboard_rank_metric;lab<-names(ch)[match(m,unname(ch))];if(length(lab)==0||is.na(lab))lab<-m
     paste0(lab," Leaderboard")
   })
@@ -7518,7 +7623,7 @@ server <- function(input, output, session) {
   output$leaderboard_table<-renderUI({
     df<-lb_sorted();if(nrow(df)==0)return(div(class="report-breakdown-note","No leaderboard data is available for the selected filters."))
     m<-input$leaderboard_rank_metric;if(is.null(m)||!m%in%names(df))m<-"Overall_Grade"
-    ch<-if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_metric_choices else lb_hitter_metric_choices
+    ch<-if(identical(input$leaderboard_type,"Pitcher"))lb_pitcher_metric_choices else if(identical(input$leaderboard_type,"Bullpen"))lb_bullpen_metric_choices else lb_hitter_metric_choices
     lab<-names(ch)[match(m,unname(ch))];if(length(lab)==0||is.na(lab))lab<-m
     best<-leaderboard_sort_best_first();icon<-if(best)"  ⇅ Best → Worst"else"  ⇅ Worst → Best";a<-lb_team_avg(df,m)
     body<-lapply(seq_len(nrow(df)),function(i){r<-df[i,,drop=FALSE];v<-r[[m]][1];tags$tr(tags$td(class="leaderboard-rank",i),tags$td(lb_link(r$Player_ID,r$Player,input$leaderboard_type)),tags$td(class=lb_class(v,a,m),lb_display(m,v)))})
@@ -7527,7 +7632,7 @@ server <- function(input, output, session) {
   })
   
   output$leaderboard_podium<-renderUI({df<-lb_sorted();if(nrow(df)==0)return(div(class="report-breakdown-note","No rankings available."));m<-input$leaderboard_rank_metric;if(is.null(m)||!m%in%names(df))m<-"Overall_Grade";top<-head(df,3);cards<-lapply(seq_len(nrow(top)),function(i){r<-top[i,,drop=FALSE];div(class="leaderboard-podium-place",div(class="leaderboard-podium-rank",paste0("#",i)),div(class="leaderboard-podium-name",lb_link(r$Player_ID,r$Player,input$leaderboard_type)),div(class="leaderboard-podium-value",lb_display(m,r[[m]][1])))});div(class="leaderboard-podium-grid",cards)})
-  observeEvent(input$leaderboard_open_player,{x<-as.character(input$leaderboard_open_player);parts<-strsplit(x,"\\|")[[1]];if(length(parts)<2)return();tp<-parts[1];id<-paste(parts[-1],collapse="|");if(identical(tp,"Pitcher")){updateSelectInput(session,"pitcher_report_pitcher",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Pitcher Report",sidebar="PITCHER REPORTS"))}else{updateSelectInput(session,"report_batter",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Hitter Report",sidebar="HITTER'S REPORTS"))}})
+  observeEvent(input$leaderboard_open_player,{x<-as.character(input$leaderboard_open_player);parts<-strsplit(x,"\\|")[[1]];if(length(parts)<2)return();tp<-parts[1];id<-paste(parts[-1],collapse="|");if(tp%in%c("Pitcher","Bullpen")){updateSelectInput(session,"pitcher_report_pitcher",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Pitcher Report",sidebar="PITCHER REPORTS"))}else{updateSelectInput(session,"report_batter",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Hitter Report",sidebar="HITTER'S REPORTS"))}})
   observeEvent(input$leaderboard_refresh,{refresh_sessions_admin_data();load_sessions(select_session_id=current_session_id());load_pitcher_report_data();load_report_pitches()})
   
   # ==================================================
@@ -12676,6 +12781,8 @@ server <- function(input, output, session) {
           if(is.finite(suppressWarnings(as.numeric(strikes_before)))&&suppressWarnings(as.numeric(strikes_before))>=2){
             pitches_after_2k(pitches_after_2k()+1)
           }
+        } else {
+          bullpen_live_pitch_count(bullpen_live_pitch_count()+1L)
         }
         
         pitch_number(
