@@ -1534,6 +1534,33 @@
         "Built": "R 4.6.0; ; 2026-06-21 15:41:33 UTC; unix"
       }
     },
+    "sodium": {
+      "Source": "CRAN",
+      "Repository": "https://cran.rstudio.com",
+      "description": {
+        "Package": "sodium",
+        "Type": "Package",
+        "Title": "A Modern and Easy-to-Use Crypto Library",
+        "Version": "1.4.0",
+        "Authors@R": "person(\"Jeroen\", \"Ooms\", role = c(\"aut\", \"cre\"), email = \"jeroenooms@gmail.com\",\n    comment = c(ORCID = \"0000-0002-4035-0289\"))",
+        "Description": "Bindings to 'libsodium' <https://doc.libsodium.org/>: a modern, \n    easy-to-use software library for encryption, decryption, signatures, password\n    hashing and more. Sodium uses curve25519, a state-of-the-art Diffie-Hellman \n    function by Daniel Bernstein, which has become very popular after it was \n    discovered that the NSA had backdoored Dual EC DRBG.",
+        "License": "MIT + file LICENSE",
+        "URL": "https://docs.ropensci.org/sodium/ https://github.com/r-lib/sodium",
+        "BugReports": "https://github.com/r-lib/sodium/issues",
+        "SystemRequirements": "libsodium (>= 1.0.3)",
+        "VignetteBuilder": "knitr",
+        "Suggests": "knitr, rmarkdown",
+        "RoxygenNote": "7.2.3",
+        "NeedsCompilation": "yes",
+        "Packaged": "2024-12-16 14:16:42 UTC; jeroen",
+        "Author": "Jeroen Ooms [aut, cre] (<https://orcid.org/0000-0002-4035-0289>)",
+        "Maintainer": "Jeroen Ooms <jeroenooms@gmail.com>",
+        "Repository": "CRAN",
+        "Date/Publication": "2024-12-16 15:00:05 UTC",
+        "Built": "R 4.6.0; aarch64-apple-darwin23; 2026-04-25 16:31:19 UTC; unix",
+        "Archs": "sodium.so.dSYM"
+      }
+    },
     "sourcetools": {
       "Source": "CRAN",
       "Repository": "https://cran.rstudio.com",
@@ -1853,7 +1880,7 @@
   },
   "files": {
     "app.R": {
-      "checksum": "e88508ddc80698bfba5c675d042f79e1"
+      "checksum": "2522a3881aa26e560eef1c70e24bad4c"
     },
     "R/.Rapp.history": {
       "checksum": "d41d8cd98f00b204e9800998ecf8427e"
