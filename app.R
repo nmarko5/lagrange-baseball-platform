@@ -1,4 +1,11 @@
+# V62.7.5 — SECURE ORGANIZATION TRANSITION
+# Built directly from working V62.7.4. Keeps the platform covered until authenticated organization switching is complete.
+# V62.6.9 — LEGACY PITCHER DROPDOWN FIX
+# Built directly from working V62.6.8.
+# V62.6.8 — TWO-STRIKE BARREL TRACKING
+# Built directly from stable V62.6.7; no authentication changes.
 library(shiny)
+library(sodium)
 library(googlesheets4)
 library(readxl)
 
@@ -38,8 +45,58 @@ source("R/scoring_engine.R")
 # ==================================================
 
 ui <- fluidPage(
+  # V62.7.2: static cover exists in the initial HTML, before Shiny has connected.
+  # This prevents the charting screen from flashing while the real login UI renders.
+  tags$div(
+    id="v6272_boot_cover",
+    style=paste0(
+      "position:fixed;inset:0;z-index:1000000;background:#f5f5f5;",
+      "display:flex;align-items:flex-start;justify-content:center;padding-top:9vh;"
+    ),
+    tags$div(
+      style=paste0(
+        "width:min(430px,92vw);background:white;padding:34px;border-radius:14px;",
+        "box-shadow:0 8px 28px rgba(0,0,0,.16);text-align:center;"
+      ),
+      tags$div(style="font-size:28px;font-weight:800;margin-bottom:8px;",
+               "Swing Decision Platform"),
+      tags$div(style="color:#666;","Loading secure sign in...")
+    )
+  ),
+  tags$div(
+    id="v6275_transition_cover",
+    style=paste0(
+      "position:fixed;inset:0;z-index:1000001;background:#f5f5f5;",
+      "display:none;align-items:flex-start;justify-content:center;padding-top:9vh;"
+    ),
+    tags$div(
+      style=paste0(
+        "width:min(430px,92vw);background:white;padding:34px;border-radius:14px;",
+        "box-shadow:0 8px 28px rgba(0,0,0,.16);text-align:center;"
+      ),
+      tags$div(style="font-size:28px;font-weight:800;margin-bottom:8px;","Swing Decision Platform"),
+      tags$div(id="v6275_transition_sub",style="color:#666;","Loading organization...")
+    )
+  ),
+  uiOutput("v6271_login_overlay"),
   
   tags$head(
+    tags$script(HTML("
+      Shiny.addCustomMessageHandler('v6272RemoveBootCover', function(x) {
+        var el = document.getElementById('v6272_boot_cover');
+        if (el) el.remove();
+      });
+      Shiny.addCustomMessageHandler('v6275ShowTransition', function(x) {
+        var el = document.getElementById('v6275_transition_cover');
+        var sub = document.getElementById('v6275_transition_sub');
+        if (sub && x && x.label) sub.textContent = 'Loading ' + x.label + '...';
+        if (el) el.style.display = 'flex';
+      });
+      Shiny.addCustomMessageHandler('v6275HideTransition', function(x) {
+        var el = document.getElementById('v6275_transition_cover');
+        if (el) el.style.display = 'none';
+      });
+    ")),
     uiOutput("org_theme_css"),
     tags$style(HTML("
 
@@ -3443,7 +3500,65 @@ v55_process_state$maintenance_done <- FALSE
 # SERVER
 # ==================================================
 
+# V62.6.8: 0-2 / 1-2 barrels. Barrel = Hard Contact.
+# Barrel % = barrels divided by balls put in play in those counts.
+v6268_two_strike_barrels <- function(d){
+  if(is.null(d)||!is.data.frame(d)||nrow(d)==0||!all(c("Count","Contact_Quality")%in%names(d)))
+    return(list(barrels=0L,bip=0L,pct=NA_real_))
+  ct<-trimws(as.character(d$Count)); cq<-trimws(as.character(d$Contact_Quality))
+  two<-!is.na(ct)&ct%in%c("0-2","1-2")
+  bip<-two&!is.na(cq)&cq%in%c("Hard","Average","Avg","Weak")
+  bar<-bip&cq=="Hard"; nb<-sum(bip,na.rm=TRUE); nbar<-sum(bar,na.rm=TRUE)
+  list(barrels=as.integer(nbar),bip=as.integer(nb),pct=if(nb>0)nbar/nb else NA_real_)
+}
+
 server <- function(input, output, session) {
+  
+  # V62.7.1 — school-level authentication state.
+  # IMPORTANT: the original V62.6.9 UI/server initialize normally behind the
+  # overlay. This avoids the missing players/sessions regression from V62.7.
+  v6271_authenticated <- reactiveVal(FALSE)
+  v6271_authenticated_org <- reactiveVal("")
+  v6271_authenticated_user_id <- reactiveVal("")
+  v6271_auth_error <- reactiveVal(NULL)
+  
+  output$v6271_login_overlay <- renderUI({
+    if(isTRUE(v6271_authenticated())) return(NULL)
+    
+    tags$div(
+      style=paste0(
+        "position:fixed;inset:0;z-index:999999;background:#f5f5f5;",
+        "display:flex;align-items:flex-start;justify-content:center;padding-top:9vh;"
+      ),
+      tags$div(
+        style=paste0(
+          "width:min(430px,92vw);background:white;padding:34px;border-radius:14px;",
+          "box-shadow:0 8px 28px rgba(0,0,0,.16);"
+        ),
+        tags$div(style="font-size:28px;font-weight:800;margin-bottom:4px;",
+                 "Swing Decision Platform"),
+        tags$div(style="color:#666;margin-bottom:24px;",
+                 "Sign in with your organization's account"),
+        textInput("v6271_login_email","Organization Login"),
+        passwordInput("v6271_login_password","Password"),
+        if(!is.null(v6271_auth_error()))
+          tags$div(style="color:#b00020;font-weight:700;margin:10px 0;",
+                   v6271_auth_error()),
+        actionButton("v6271_login_submit","SIGN IN",
+                     class="btn btn-primary",
+                     style="width:100%;font-weight:800;")
+      )
+    )
+  })
+  
+  observeEvent(input$v6271_login_email, {
+    session$sendCustomMessage("v6272RemoveBootCover", list())
+  }, once=TRUE, ignoreInit=FALSE)
+  
+  session$onFlushed(function(){
+    session$sendCustomMessage("v6272RemoveBootCover", list())
+  }, once=TRUE)
+  
   
   balls <- reactiveVal(0)
   strikes <- reactiveVal(0)
@@ -3561,6 +3676,44 @@ server <- function(input, output, session) {
     x<-trimws(setting_chr("Organization_ID","LAGRANGE"))
     if(x=="")"LAGRANGE"else x
   }
+  
+  # V62.7.3 — hard organization boundary for all shared historical datasets.
+  # During authenticated use, the login-selected organization is authoritative.
+  v6273_org_id <- function(){
+    auth_org <- tryCatch(trimws(as.character(v6271_authenticated_org())),error=function(e)"")
+    if(nzchar(auth_org)) return(toupper(auth_org))
+    toupper(trimws(current_org_id()))
+  }
+  
+  v6273_scope_org <- function(d){
+    if(is.null(d) || !is.data.frame(d) || nrow(d)==0) return(d)
+    org <- v6273_org_id()
+    if(!nzchar(org)) return(d)
+    
+    if("Organization_ID" %in% names(d)){
+      row_org <- toupper(trimws(as.character(d$Organization_ID)))
+      keep <- !is.na(row_org) & row_org==org
+      return(d[keep,,drop=FALSE])
+    }
+    
+    # Legacy fallback: when a historical frame lacks Organization_ID, only keep
+    # rows whose Session_ID belongs to the authenticated organization's sessions.
+    if("Session_ID" %in% names(d)){
+      s <- sessions_admin_sessions()
+      if(!is.null(s) && is.data.frame(s) && nrow(s)>0 &&
+         all(c("Session_ID","Organization_ID") %in% names(s))){
+        s_org <- toupper(trimws(as.character(s$Organization_ID)))
+        valid_ids <- as.character(s$Session_ID[!is.na(s_org) & s_org==org])
+        return(d[as.character(d$Session_ID) %in% valid_ids,,drop=FALSE])
+      }
+    }
+    
+    # Fail closed for authenticated school use if a shared historical frame
+    # cannot be proven to belong to that organization.
+    if(isTRUE(v6271_authenticated())) return(d[0,,drop=FALSE])
+    d
+  }
+  
   current_user_row <- function(){
     uid <- active_user_id()
     users <- user_directory()
@@ -4786,6 +4939,164 @@ server <- function(input, output, session) {
     })
   }
   
+  
+  # V62.7.1 — one credential per organization, not one credential per coach.
+  # The credential selects an existing representative Users row for that org.
+  # LaGrange uses Nate's existing account; Georgia State uses Will's existing row.
+  observeEvent(input$v6271_login_submit,{
+    email <- tolower(trimws(as.character(input$v6271_login_email)))
+    password <- as.character(input$v6271_login_password)
+    
+    lagrange_email <- tolower(trimws(Sys.getenv(
+      "LAGRANGE_AUTH_EMAIL", unset="natemarko5@gmail.com"
+    )))
+    gsu_email <- tolower(trimws(Sys.getenv(
+      "GEORGIA_STATE_AUTH_EMAIL", unset="wmaddox@gsu.edu"
+    )))
+    
+    target_org <- if(identical(email,lagrange_email)){
+      "LAGRANGE"
+    } else if(identical(email,gsu_email)){
+      "GEORGIA_STATE"
+    } else {
+      ""
+    }
+    
+    if(!nzchar(target_org)){
+      v6271_auth_error("Incorrect organization login or password.")
+      return()
+    }
+    
+    # Backward-compatible local fallback lets Nate keep using the hash already
+    # configured on his machine. Production can use organization-level names.
+    hash <- if(target_org=="LAGRANGE"){
+      x <- Sys.getenv("LAGRANGE_AUTH_HASH",unset="")
+      if(!nzchar(x)) x <- Sys.getenv("NATE_AUTH_HASH",unset="")
+      x
+    } else {
+      x <- Sys.getenv("GEORGIA_STATE_AUTH_HASH",unset="")
+      if(!nzchar(x)) x <- Sys.getenv("WILL_AUTH_HASH",unset="")
+      x
+    }
+    
+    if(!nzchar(hash)){
+      v6271_auth_error("Authentication is not configured for this organization.")
+      return()
+    }
+    
+    ok <- tryCatch(
+      sodium::password_verify(hash,password),
+      error=function(e) FALSE
+    )
+    if(!isTRUE(ok)){
+      v6271_auth_error("Incorrect organization login or password.")
+      return()
+    }
+    org_label <- if(identical(target_org,"GEORGIA_STATE")) "Georgia State" else "LaGrange"
+    session$sendCustomMessage("v6275ShowTransition",list(label=org_label))
+    
+    
+    # Use the already-loaded Users directory whenever possible. If startup has
+    # not finished that read yet, load it once here.
+    users <- user_directory()
+    if(is.null(users) || !is.data.frame(users) || nrow(users)==0){
+      load_user_directory()
+      users <- user_directory()
+    }
+    
+    if(is.null(users) || !is.data.frame(users) || nrow(users)==0 ||
+       !all(c("User_ID","Organization_ID")%in%names(users))){
+      v6271_auth_error("User directory is not ready. Please try signing in again.")
+      return()
+    }
+    
+    org_match <- toupper(trimws(as.character(users$Organization_ID)))==target_org
+    candidates <- users[org_match,,drop=FALSE]
+    
+    # Prefer the school login email's existing Users row (Nate / Will).
+    if(nrow(candidates)>0 && "Email"%in%names(candidates)){
+      email_match <- tolower(trimws(as.character(candidates$Email)))==email
+      if(any(email_match,na.rm=TRUE)) candidates <- candidates[email_match,,drop=FALSE]
+    }
+    
+    if(nrow(candidates)==0){
+      v6271_auth_error("This organization does not have an active platform user configured.")
+      return()
+    }
+    
+    uid <- trimws(as.character(candidates$User_ID[1]))
+    if(!nzchar(uid)){
+      v6271_auth_error("This organization does not have a valid platform user configured.")
+      return()
+    }
+    
+    # Lock the authenticated organization before switching identity.
+    v6271_authenticated_org(target_org)
+    v6271_authenticated_user_id(uid)
+    
+    # Georgia State must never inherit Nate's development platform-owner flag
+    # from the hidden startup state.
+    platform_owner_session(identical(target_org,"LAGRANGE"))
+    
+    # Bind to the school using the state V62.6.9 already loaded behind the login.
+    # Avoid another full Players read plus duplicate session/report reads here;
+    # those extra requests were contributing to Google Sheets 429 throttling.
+    active_user_id(uid)
+    updateSelectInput(session,"setting_active_user",selected=uid)
+    
+    # Architecture reads are cached in the existing V62.6.2 layer.
+    load_season_architecture()
+    
+    # V62.7.3: immediately purge the pre-login startup snapshots down to the
+    # authenticated organization. This is in-memory only — no additional Sheet reads.
+    sessions_admin_sessions(v6273_scope_org(sessions_admin_sessions()))
+    sessions_admin_pitches(v6273_scope_org(sessions_admin_pitches()))
+    sessions_admin_pas(v6273_scope_org(sessions_admin_pas()))
+    report_pitches(v6273_scope_org(report_pitches()))
+    report_plate_appearances(v6273_scope_org(report_plate_appearances()))
+    pitcher_report_pitches_raw(v6273_scope_org(pitcher_report_pitches_raw()))
+    pitcher_report_pa_raw(v6273_scope_org(pitcher_report_pa_raw()))
+    
+    # Rebuild session/report UI from the isolated in-memory snapshots.
+    load_sessions()
+    
+    # V62.7.4: explicitly clear any browser-side pre-login session selection
+    # when the authenticated organization has no sessions.
+    isolated_sessions <- v6273_scope_org(session_lookup())
+    if(is.null(isolated_sessions) || !is.data.frame(isolated_sessions) ||
+       nrow(isolated_sessions)==0){
+      session_lookup(data.frame())
+      updateSelectInput(
+        session,
+        "session_select",
+        choices=c("No Sessions Yet"=""),
+        selected=""
+      )
+    }
+    
+    load_report_pitches()
+    load_pitcher_report_data()
+    
+    # Rebuild dropdown choices from the already-loaded player/report state.
+    try(v6264_refresh_live_player_choices(),silent=TRUE)
+    
+    u <- current_user_row()
+    if(nrow(u)>0 && "Display_Name"%in%names(u)){
+      updateTextInput(session,"charting_user",value=as.character(u$Display_Name[1]))
+    }
+    
+    v6271_auth_error(NULL)
+    v6271_authenticated(TRUE)
+    
+    # Re-apply feature + admin visibility after the organization switch.
+    try(v625_push_feature_visibility(),silent=TRUE)
+    try(v625_push_platform_admin_visibility(),silent=TRUE)
+    session$onFlushed(function(){
+      session$sendCustomMessage("v6275HideTransition",list())
+    },once=TRUE)
+    
+  },ignoreInit=TRUE)
+  
   output$identity_status<-renderUI({
     u<-current_user_row()
     if(nrow(u)==0)return(div(class="warning-text","No active development user is selected."))
@@ -4798,6 +5109,16 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$setting_active_user,{
+    if(isTRUE(v6271_authenticated()) &&
+       nzchar(v6271_authenticated_org()) &&
+       v6271_authenticated_org()!="LAGRANGE"){
+      locked_uid <- v6271_authenticated_user_id()
+      if(nzchar(locked_uid) && !identical(active_user_id(),locked_uid)){
+        active_user_id(locked_uid)
+      }
+      updateSelectInput(session,"setting_active_user",selected=locked_uid)
+      return()
+    }
     uid<-if(is.null(input$setting_active_user))""else trimws(as.character(input$setting_active_user))
     if(!nzchar(uid))return()
     
@@ -4813,6 +5134,16 @@ server <- function(input, output, session) {
   },ignoreInit=TRUE)
   
   observeEvent(input$setting_active_user,{
+    if(isTRUE(v6271_authenticated()) &&
+       nzchar(v6271_authenticated_org()) &&
+       v6271_authenticated_org()!="LAGRANGE"){
+      locked_uid <- v6271_authenticated_user_id()
+      if(nzchar(locked_uid) && !identical(active_user_id(),locked_uid)){
+        active_user_id(locked_uid)
+      }
+      updateSelectInput(session,"setting_active_user",selected=locked_uid)
+      return()
+    }
     uid<-if(is.null(input$setting_active_user))""else trimws(as.character(input$setting_active_user))
     if(!nzchar(uid))return()
     if(uid==active_user_id())return()
@@ -5927,7 +6258,7 @@ server <- function(input, output, session) {
   }
   
   sessions_filtered <- reactive({
-    d<-sessions_admin_sessions()
+    d<-v6273_scope_org(sessions_admin_sessions())
     if(is.null(d)||nrow(d)==0)return(data.frame())
     if("Session_Date"%in%names(d)){
       dt<-as.Date(as.character(d$Session_Date)); rg<-input$sessions_date_filter
@@ -5968,7 +6299,7 @@ server <- function(input, output, session) {
       {
         
         # V48: render from the in-memory backend snapshot.
-        sessions_data <- sessions_admin_sessions()
+        sessions_data <- v6273_scope_org(sessions_admin_sessions())
         
         if (
           is.null(sessions_data) ||
@@ -6056,27 +6387,30 @@ server <- function(input, output, session) {
     
     session_id <- current_session_id()
     
-    if (is.null(session_id)) {
+    if (is.null(session_id) || !nzchar(trimws(as.character(session_id)))) {
       return("No Session Selected")
     }
     
-    session_data <- session_lookup()
+    session_data <- v6273_scope_org(session_lookup())
     
+    # V62.7.4: fail closed if the browser still holds a Session_ID from the
+    # pre-login organization.
     if (
-      nrow(session_data) == 0
+      nrow(session_data) == 0 ||
+      !"Session_ID" %in% names(session_data) ||
+      !as.character(session_id) %in% as.character(session_data$Session_ID)
     ) {
-      
-      return(session_id)
-      
+      return("No Session Selected")
     }
     
     row <- session_data[
-      session_data$Session_ID ==
-        session_id,
+      as.character(session_data$Session_ID) == as.character(session_id),
+      ,
+      drop = FALSE
     ]
     
     if (nrow(row) == 0) {
-      return(session_id)
+      return("No Session Selected")
     }
     
     paste0(
@@ -7099,7 +7433,7 @@ server <- function(input, output, session) {
   
   load_pitcher_report_data <- function() {
     tryCatch({
-      d <- sessions_admin_pitches()
+      d <- v6273_scope_org(sessions_admin_pitches())
       if(is.null(d)) d <- data.frame()
       d <- v49_normalize_sheet_data(as.data.frame(d,stringsAsFactors=FALSE), "pitches")
       
@@ -7130,7 +7464,7 @@ server <- function(input, output, session) {
     })
     
     tryCatch({
-      p <- sessions_admin_pas()
+      p <- v6273_scope_org(sessions_admin_pas())
       if(is.null(p)) p <- data.frame()
       pitcher_report_pa_raw(v49_normalize_sheet_data(as.data.frame(p,stringsAsFactors=FALSE), "pa"))
     },error=function(e){
@@ -7265,7 +7599,7 @@ server <- function(input, output, session) {
   
   output$pitcher_report_kpis <- renderUI({
     x<-p_metrics();b<-pitcher_team_benchmarks()
-    if(is.null(x))return(tagList(pkpi("Pitches","0"),pkpi("1st Pitch Strike %","N/A"),pkpi("Strike %","N/A"),pkpi("Whiff %","N/A"),pkpi("Chase %","N/A"),pkpi("Ahead %","N/A"),pkpi("Behind %","N/A"),pkpi("Contact ≤3 Pitches","N/A"),pkpi("≤15 Pitch Innings","N/A")))
+    if(is.null(x))return(tagList(pkpi("Pitches","0"),pkpi("1st Pitch Strike %","N/A"),pkpi("Strike %","N/A"),pkpi("Whiff %","N/A"),pkpi("Chase %","N/A"),pkpi("Ahead %","N/A"),pkpi("Behind %","N/A"),pkpi("Contact ≤3 Pitches","N/A"),pkpi("≤15 Pitch Innings","N/A"),pkpi("0-2 / 1-2 Barrels","0"),pkpi("0-2 / 1-2 Barrel %","N/A","Barrels ÷ balls in play")))
     av<-function(nm)if(is.null(b))NA_real_ else b[[nm]]
     tagList(
       pkpi("Pitches",x$pitches),
@@ -7276,7 +7610,9 @@ server <- function(input, output, session) {
       pkpi("Ahead %",p_pct(x$ahead),"",p_bench_class(x$ahead,av("ahead"),TRUE)),
       pkpi("Behind %",p_pct(x$behind),"",p_bench_class(x$behind,av("behind"),FALSE)),
       pkpi("Contact ≤3 Pitches",p_pct(x$early_contact),"PA with Foul/In Play in first 3",p_bench_class(x$early_contact,av("early_contact"),TRUE)),
-      pkpi("≤15 Pitch Innings",p_pct(x$eff),if(x$ni>0)paste0("Avg ",sprintf("%.1f",x$api)," pitches/inning")else"Inning data begins with new charting",p_bench_class(x$eff,av("eff"),TRUE))
+      pkpi("≤15 Pitch Innings",p_pct(x$eff),if(x$ni>0)paste0("Avg ",sprintf("%.1f",x$api)," pitches/inning")else"Inning data begins with new charting",p_bench_class(x$eff,av("eff"),TRUE)),
+      pkpi("0-2 / 1-2 Barrels",v6268_two_strike_barrels(pitcher_pitches())$barrels),
+      pkpi("0-2 / 1-2 Barrel %",p_pct(v6268_two_strike_barrels(pitcher_pitches())$pct),"Barrels ÷ balls in play")
     )
   })
   
@@ -7394,8 +7730,8 @@ server <- function(input, output, session) {
   lb_name<-function(id){lu<-player_lookup();if(nrow(lu)==0||!"Player_ID"%in%names(lu))return(as.character(id));r<-lu[as.character(lu$Player_ID)==as.character(id),,drop=FALSE];if(nrow(r)==0)return(as.character(id));if("Display_Name"%in%names(r)&&!is.na(r$Display_Name[1])&&trimws(as.character(r$Display_Name[1]))!="")trimws(as.character(r$Display_Name[1])) else as.character(id)}
   lb_session_date_map<-reactive({s<-session_lookup();if(nrow(s)==0||!all(c("Session_ID","Session_Date")%in%names(s)))return(setNames(as.Date(character(0)),character(0)));setNames(suppressWarnings(as.Date(s$Session_Date)),as.character(s$Session_ID))})
   lb_filter_frame<-function(d){if(is.null(d)||nrow(d)==0)return(data.frame());sid<-input$leaderboard_session;if(!is.null(sid)&&sid!=""&&sid!="ALL"&&"Session_ID"%in%names(d))d<-d[as.character(d$Session_ID)==sid,,drop=FALSE];rg<-input$leaderboard_date_range;mp<-lb_session_date_map();if("Session_ID"%in%names(d)&&length(mp)>0&&!is.null(rg)&&length(rg)==2&&!is.na(rg[1])&&!is.na(rg[2])){dd<-unname(mp[as.character(d$Session_ID)]);keep<-!is.na(dd)&dd>=as.Date(rg[1])&dd<=as.Date(rg[2]);d<-d[keep,,drop=FALSE]};d}
-  leaderboard_pitches<-reactive({lb_filter_frame(p_live_only(pitcher_report_pitches_raw()))})
-  leaderboard_pas<-reactive({lb_filter_frame(pitcher_report_pa_raw())})
+  leaderboard_pitches<-reactive({lb_filter_frame(p_live_only(v6273_scope_org(pitcher_report_pitches_raw())))})
+  leaderboard_pas<-reactive({lb_filter_frame(v6273_scope_org(pitcher_report_pa_raw()))})
   
   observe({s<-session_lookup();if(nrow(s)==0||!"Session_ID"%in%names(s))return();v<-s[!is.na(s$Session_ID)&as.character(s$Session_ID)!="",,drop=FALSE];labs<-if(all(c("Session_Date","Session_Name")%in%names(v)))paste0(v$Session_Date," — ",v$Session_Name)else as.character(v$Session_ID);ch<-as.character(v$Session_ID);names(ch)<-labs;ch<-c("All Sessions (Cumulative)"="ALL",ch);cur<-isolate(input$leaderboard_session);if(is.null(cur)||!cur%in%ch)cur<-"ALL";updateSelectInput(session,"leaderboard_session",choices=ch,selected=cur);if("Session_Date"%in%names(v)){dd<-suppressWarnings(as.Date(v$Session_Date));dd<-dd[!is.na(dd)];if(length(dd)>0)updateDateRangeInput(session,"leaderboard_date_range",start=min(dd),end=max(dd))}})
   
@@ -7445,7 +7781,9 @@ server <- function(input, output, session) {
     "BABIP"="BABIP","Opponent AVG"="Opp_AVG","Opponent OBP"="Opp_OBP","Opponent SLG"="Opp_SLG",
     "Hard Contact Allowed %"="Hard_Contact_Pct",
     "Medium Contact Allowed %"="Medium_Contact_Pct",
-    "Soft Contact Allowed %"="Soft_Contact_Pct"
+    "Soft Contact Allowed %"="Soft_Contact_Pct",
+    "0-2 / 1-2 Barrels Allowed"="Two_Strike_Barrels",
+    "0-2 / 1-2 Barrel %"="Two_Strike_Barrel_Pct"
   )
   lb_bullpen_metric_choices <- c(
     "Command Grade"="Command_Grade","Execution Quality"="Execution_Quality",
@@ -7495,7 +7833,7 @@ server <- function(input, output, session) {
       id<-as.character(r$Player_ID);pd<-p[as.character(p$Pitcher_ID)==id,,drop=FALSE];ad<-if(nrow(pa)>0&&"Pitcher_ID"%in%names(pa))pa[as.character(pa$Pitcher_ID)==id,,drop=FALSE]else data.frame()
       bf<-nrow(ad);k<-lb_sum_col(ad,"Is_K");bb<-lb_sum_col(ad,"Is_BB");hbp<-lb_sum_col(ad,"Is_HBP");hits<-lb_sum_col(ad,"Is_Hit");ab<-lb_sum_col(ad,"Is_AB");sf<-lb_sum_col(ad,"Is_SF");tb<-lb_sum_col(ad,"Bases_Total");res<-if(nrow(ad)>0&&"PA_Result"%in%names(ad))as.character(ad$PA_Result)else character(0);hr<-sum(res=="Home Run",na.rm=TRUE)
       cq<-if("Contact_Quality"%in%names(pd))as.character(pd$Contact_Quality)else character(0);cd<-sum(cq%in%c("Hard","Average","Avg","Weak"),na.rm=TRUE);games<-if("Session_ID"%in%names(pd))length(unique(as.character(pd$Session_ID[!is.na(pd$Session_ID)&as.character(pd$Session_ID)!=""])))else NA_real_
-      data.frame(Player_ID=id,Player=lb_name(id),Overall_Grade=overall,Command_Grade=command,Miss_Grade=miss,Efficiency_Grade=eff,Pitches=nrow(pd),BF=bf,G=games,K=k,BB=bb,HBP=hbp,HR=hr,FPS_Pct=r$FPS_Pct,Strike_Pct=r$Strike_Pct,Zone_Pct=r$Zone_Pct,Whiff_Pct=r$Whiff_Pct,Chase_Pct=r$Chase_Pct,Ahead_Pct=r$Ahead_Pct,Behind_Pct=r$Behind_Pct,Early_Contact_Pct=r$Early_Contact_Pct,Efficient_Inning_Pct=r$Efficient_Inning_Pct,Avg_Pitches_Inning=r$Avg_Pitches_Inning,K_Pct=lb_rate(k,bf),BB_Pct=lb_rate(bb,bf),KBB_Pct=lb_rate(k-bb,bf),HR_Pct=lb_rate(hr,bf),BABIP=lb_rate(hits-hr,ab-k-hr+sf),Opp_AVG=lb_rate(hits,ab),Opp_OBP=lb_rate(hits+bb+hbp,ab+bb+hbp+sf),Opp_SLG=lb_rate(tb,ab),Hard_Contact_Pct=lb_rate(sum(cq=="Hard",na.rm=TRUE),cd),Medium_Contact_Pct=lb_rate(sum(cq%in%c("Average","Avg"),na.rm=TRUE),cd),Soft_Contact_Pct=lb_rate(sum(cq=="Weak",na.rm=TRUE),cd),stringsAsFactors=FALSE)
+      data.frame(Player_ID=id,Player=lb_name(id),Overall_Grade=overall,Command_Grade=command,Miss_Grade=miss,Efficiency_Grade=eff,Pitches=nrow(pd),BF=bf,G=games,K=k,BB=bb,HBP=hbp,HR=hr,FPS_Pct=r$FPS_Pct,Strike_Pct=r$Strike_Pct,Zone_Pct=r$Zone_Pct,Whiff_Pct=r$Whiff_Pct,Chase_Pct=r$Chase_Pct,Ahead_Pct=r$Ahead_Pct,Behind_Pct=r$Behind_Pct,Early_Contact_Pct=r$Early_Contact_Pct,Efficient_Inning_Pct=r$Efficient_Inning_Pct,Avg_Pitches_Inning=r$Avg_Pitches_Inning,K_Pct=lb_rate(k,bf),BB_Pct=lb_rate(bb,bf),KBB_Pct=lb_rate(k-bb,bf),HR_Pct=lb_rate(hr,bf),BABIP=lb_rate(hits-hr,ab-k-hr+sf),Opp_AVG=lb_rate(hits,ab),Opp_OBP=lb_rate(hits+bb+hbp,ab+bb+hbp+sf),Opp_SLG=lb_rate(tb,ab),Hard_Contact_Pct=lb_rate(sum(cq=="Hard",na.rm=TRUE),cd),Medium_Contact_Pct=lb_rate(sum(cq%in%c("Average","Avg"),na.rm=TRUE),cd),Soft_Contact_Pct=lb_rate(sum(cq=="Weak",na.rm=TRUE),cd),Two_Strike_Barrels=v6268_two_strike_barrels(pd)$barrels,Two_Strike_Barrel_Pct=v6268_two_strike_barrels(pd)$pct,stringsAsFactors=FALSE)
     }))
   })
   
@@ -7585,7 +7923,7 @@ server <- function(input, output, session) {
     else lb_hitter_rows()
   })
   lb_higher<-function(metric){
-    lower<-c("Chase_Pct","Whiff_Pct","K_Pct","Behind_Pct","Avg_Pitches_Inning","BB_Pct","HR_Pct","Opp_AVG","Opp_OBP","Opp_SLG","Hard_Contact_Pct","Medium_Contact_Pct","Avg_Miss")
+    lower<-c("Chase_Pct","Whiff_Pct","K_Pct","Behind_Pct","Avg_Pitches_Inning","BB_Pct","HR_Pct","Opp_AVG","Opp_OBP","Opp_SLG","Hard_Contact_Pct","Medium_Contact_Pct","Avg_Miss","Two_Strike_Barrels","Two_Strike_Barrel_Pct")
     if(identical(input$leaderboard_type,"Pitcher"))lower<-setdiff(lower,c("Whiff_Pct","Chase_Pct"))
     !metric%in%lower
   }
@@ -7597,7 +7935,7 @@ server <- function(input, output, session) {
     if(m=="Avg_Miss"){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"N/A"else paste0(sprintf("%.1f",v)," in"))}
     if(m%in%c("AVG","OBP","SLG","OPS","BABIP","Opp_AVG","Opp_OBP","Opp_SLG"))return(lb_avg_fmt(v))
     if(m=="Contact_Quality_Score"){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"N/A"else paste0(ifelse(v>0,"+",""),sprintf("%.2f",v)))}
-    counts<-c("PA","AB","Hits","SO","BB","HBP","RBI","Pitches","BF","G","K","HR","Bullpens","QUABs","QUAB_Hit","QUAB_BBHBP","QUAB_RBI","QUAB_8Pitch","QUAB_4After2K","QUAB_Barrel","QUAB_Offensive","QUAB_MoveThird","QUAB_Error")
+    counts<-c("PA","AB","Hits","SO","BB","HBP","RBI","Pitches","BF","G","K","HR","Bullpens","Two_Strike_Barrels","QUABs","QUAB_Hit","QUAB_BBHBP","QUAB_RBI","QUAB_8Pitch","QUAB_4After2K","QUAB_Barrel","QUAB_Offensive","QUAB_MoveThird","QUAB_Error")
     if(m%in%counts){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"0"else as.character(as.integer(round(v))))}
     if(m=="Avg_Pitches_Inning"){v<-suppressWarnings(as.numeric(v));return(if(!is.finite(v))"N/A"else sprintf("%.1f",v))}
     lb_pct(v)
@@ -8615,14 +8953,14 @@ server <- function(input, output, session) {
   
   team_report_pitches <- reactive({
     team_report_filter_frame(
-      p_live_only(pitcher_report_pitches_raw())
+      p_live_only(v6273_scope_org(pitcher_report_pitches_raw()))
     )
   })
   
   
   team_report_pas <- reactive({
     team_report_filter_frame(
-      pitcher_report_pa_raw()
+      v6273_scope_org(pitcher_report_pa_raw())
     )
   })
   
@@ -9002,6 +9340,8 @@ server <- function(input, output, session) {
         cden
       ),
       soft = lb_rate(sum(cq == "Weak", na.rm = TRUE), cden),
+      two_strike_barrels = v6268_two_strike_barrels(p)$barrels,
+      two_strike_barrel_pct = v6268_two_strike_barrels(p)$pct,
       pitches = nrow(p),
       bf = nrow(pa)
     )
@@ -9050,7 +9390,9 @@ server <- function(input, output, session) {
             team_kpi_card("1st Pitch Strike %","N/A"),
             team_kpi_card("Whiff %","N/A"),
             team_kpi_card("≤15 Pitch Innings %","N/A"),
-            team_kpi_card("Contact ≤3 Pitches %","N/A")
+            team_kpi_card("Contact ≤3 Pitches %","N/A"),
+            team_kpi_card("0-2 / 1-2 Barrels","0"),
+            team_kpi_card("0-2 / 1-2 Barrel %","N/A")
           )
         )
       }
@@ -9063,7 +9405,9 @@ server <- function(input, output, session) {
         team_kpi_card("1st Pitch Strike %", team_pct_display(x$fps)),
         team_kpi_card("Whiff %", team_pct_display(x$whiff)),
         team_kpi_card("≤15 Pitch Innings %", team_pct_display(x$efficient_innings)),
-        team_kpi_card("Contact ≤3 Pitches %", team_pct_display(x$early_contact))
+        team_kpi_card("Contact ≤3 Pitches %", team_pct_display(x$early_contact)),
+        team_kpi_card("0-2 / 1-2 Barrels", as.character(x$two_strike_barrels)),
+        team_kpi_card("0-2 / 1-2 Barrel %", team_pct_display(x$two_strike_barrel_pct))
       )
       
     } else {
@@ -9957,7 +10301,7 @@ server <- function(input, output, session) {
     
     tryCatch(
       {
-        pitches_data <- sessions_admin_pitches()
+        pitches_data <- v6273_scope_org(sessions_admin_pitches())
         if(is.null(pitches_data)) pitches_data <- data.frame()
         
         report_pitches(
@@ -9977,7 +10321,7 @@ server <- function(input, output, session) {
     
     tryCatch(
       {
-        pa_data <- sessions_admin_pas()
+        pa_data <- v6273_scope_org(sessions_admin_pas())
         if(is.null(pa_data)) pa_data <- data.frame()
         
         report_plate_appearances(
@@ -16536,8 +16880,75 @@ server <- function(input, output, session) {
     d[0,,drop=FALSE]
   }
   
+  v6269_legacy_pitcher_cache <- reactiveVal(NULL)
+  
+  # V62.6.9: preserve the season roster as the primary source, but recover
+  # legacy pitchers who already have charted live/game data for this organization.
+  # This fixes historical IDs such as LAGRANGE_HAVEN_ADAMS without rewriting Sheets.
+  v6269_add_charted_legacy_pitchers <- function(d){
+    d <- v6265_normalize_player_schema(d)
+    all_players <- v6269_legacy_pitcher_cache()
+    if(is.null(all_players)){
+      all_players <- tryCatch(
+        v6265_normalize_player_schema(gs_read_players(sheet_url=SHEET_URL)),
+        error=function(e)data.frame()
+      )
+      v6269_legacy_pitcher_cache(all_players)
+    }
+    pitches <- tryCatch(
+      p_live_only(pitcher_report_pitches_raw()),
+      error=function(e)data.frame()
+    )
+    
+    if(nrow(all_players)==0 || nrow(pitches)==0 ||
+       !"Player_ID"%in%names(all_players) || !"Pitcher_ID"%in%names(pitches)){
+      return(d)
+    }
+    
+    if("Organization_ID"%in%names(all_players)){
+      all_players <- all_players[
+        trimws(as.character(all_players$Organization_ID))==current_org_id(),
+        ,drop=FALSE
+      ]
+    }
+    
+    charted_ids <- unique(trimws(as.character(pitches$Pitcher_ID)))
+    charted_ids <- charted_ids[
+      !is.na(charted_ids) & nzchar(charted_ids) &
+        !toupper(charted_ids)%in%c("NA","N/A","NULL","NONE")
+    ]
+    
+    add <- all_players[
+      trimws(as.character(all_players$Player_ID))%in%charted_ids,
+      ,drop=FALSE
+    ]
+    if(nrow(add)==0) return(d)
+    
+    # A charted pitcher is a pitcher for selection purposes even if a legacy row
+    # has an ambiguous/misaligned Player_Type field.
+    add$Player_Type <- "Pitcher"
+    
+    if(is.null(d)||!is.data.frame(d)||nrow(d)==0) return(add)
+    existing <- trimws(as.character(d$Player_ID))
+    add <- add[!trimws(as.character(add$Player_ID))%in%existing,,drop=FALSE]
+    if(nrow(add)==0) return(d)
+    
+    out <- rbind(d,add)
+    rownames(out)<-NULL
+    out
+  }
+  
   v6264_refresh_live_player_choices <- function(){
     d <- v6265_normalize_player_schema(player_lookup())
+    d <- v6269_add_charted_legacy_pitchers(d)
+    if(is.data.frame(d) && nrow(d)>0){
+      current_lookup <- player_lookup()
+      current_ids <- if(is.data.frame(current_lookup)&&nrow(current_lookup)>0&&"Player_ID"%in%names(current_lookup)) trimws(as.character(current_lookup$Player_ID)) else character(0)
+      new_ids <- trimws(as.character(d$Player_ID))
+      if(length(new_ids)!=length(current_ids) || !setequal(new_ids,current_ids)){
+        player_lookup(d)
+      }
+    }
     
     if(is.null(d) || !is.data.frame(d) || nrow(d)==0){
       updateSelectInput(session,"batter",choices=c("No Active Hitters"=""),selected="")
@@ -16620,6 +17031,7 @@ server <- function(input, output, session) {
   # Listening to active_user_id() itself guarantees the new organization's
   # roster is loaded after the identity actually changes.
   observeEvent(active_user_id(),{
+    v6269_legacy_pitcher_cache(NULL)
     uid <- active_user_id()
     if(is.null(uid) || !nzchar(uid)) return()
     
