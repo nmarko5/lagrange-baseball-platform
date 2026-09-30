@@ -13894,8 +13894,11 @@ server <- function(input, output, session) {
     if(isTRUE(increment_pa))pa_number(pa_number()+1)
   }
   observeEvent(pa_complete(),{
-    if(isTRUE(pa_complete()) && isTRUE(v628_lineups_ready()) && !identical(input$charting_mode,"Bullpen")){
-      v628_advance_batter(1L);v628_reset_pa_state(TRUE)
+    # V62.9: always start the next PA automatically (no NEW PA click).
+    # With lineups saved, also move to the next hitter in the order.
+    if(isTRUE(pa_complete()) && !identical(input$charting_mode,"Bullpen")){
+      if(isTRUE(v628_lineups_ready())) v628_advance_batter(1L)
+      v628_reset_pa_state(TRUE)
     }
   },ignoreInit=TRUE)
   observeEvent(input$session_select,{
@@ -13948,6 +13951,9 @@ server <- function(input, output, session) {
   # When the half-inning flips, bring back that side's pitcher.
   observeEvent(input$inning_half,{
     if(identical(input$charting_mode,"Bullpen")) return()
+    # A new half-inning always starts a fresh count (0-0).
+    # If a finished PA hasn't been cleared yet, move to the next PA number.
+    v628_reset_pa_state(isTRUE(pa_complete()))
     half <- v629_current_half()
     saved <- v629_half_pitchers()[[half]]
     side_label <- if(identical(half,"Top")) "home" else "away"
@@ -14681,9 +14687,9 @@ server <- function(input, output, session) {
         return(NULL)
       }
       
-      # V62.8.5: automatic lineup mode advances to the next hitter itself.
-      # Do not render the old PA COMPLETE / NEW PA card in this mode.
-      if (isTRUE(v628_lineups_ready()) && !identical(input$charting_mode, "Bullpen")) {
+      # V62.9: the next PA always starts automatically, so the old
+      # PA COMPLETE / NEW PA card is never shown.
+      if (TRUE) {
         return(NULL)
       }
       
