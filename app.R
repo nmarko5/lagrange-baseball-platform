@@ -14263,7 +14263,7 @@ server <- function(input, output, session) {
   observeEvent(input$pa_sac_bunt,{selected_in_play_result("Sac Bunt")})
   
   output$v628_pa_extras_bottom <- renderUI({
-    if(identical(input$charting_mode,"Bullpen") || isTRUE(in_play_active()) || isTRUE(pa_complete()))return(NULL)
+    if(identical(input$charting_mode,"Bullpen") ||  isTRUE(pa_complete()))return(NULL)
     div(
       class="quab-charting-box",
       style="margin-top:18px;",
@@ -14441,20 +14441,6 @@ server <- function(input, output, session) {
         
         br(),
         
-        div(
-          class="quab-charting-box",
-          style="margin-top:10px;margin-bottom:12px;",
-          div(class="quab-charting-title","PA EXTRAS / QUAB TRACKING"),
-          div(
-            class="quab-charting-grid",
-            numericInput("pa_rbi","RBI",value=0,min=0,max=10,step=1),
-            
-            checkboxInput("quab_offensive_play","Successful Offensive Play",value=FALSE),
-            checkboxInput("quab_move_runner_third","Moved Runner to 3rd (<2 outs)",value=FALSE)
-          ),
-          div(class="quab-charting-note",
-              "Hard contact automatically credits Barrel. Check any extra items that apply before saving the PA.")
-        ),
         
         actionButton(
           "complete_in_play_pa",
