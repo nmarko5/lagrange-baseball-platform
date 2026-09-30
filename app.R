@@ -2201,6 +2201,8 @@ ui <- fluidPage(
       
       uiOutput("v628_pa_extras_bottom"),
       
+      uiOutput("v629_in_play_save_ui"),
+      
       uiOutput("charting_message"),
       
       uiOutput("save_message"),
@@ -6905,7 +6907,7 @@ server <- function(input, output, session) {
     v6271_authenticated(),
     {
       if(!isTRUE(v6271_authenticated())) return()
-    
+      
       try(v628_ensure_game_architecture(),silent=TRUE)
       try(v628_refresh_opponents(),silent=TRUE)
       load_sessions()
@@ -13916,6 +13918,75 @@ server <- function(input, output, session) {
   },ignoreInit=TRUE,priority=20)
   
   # ==================================================
+  # V62.9 — AUTOMATIC PITCHER SWITCH AT THE HALF-INNING
+  # ==================================================
+  # The app remembers who is pitching in the TOP half (home team's pitcher)
+  # and the BOTTOM half (away team's pitcher). When the half-inning flips,
+  # the Pitcher dropdown switches to that side's pitcher automatically.
+  # Coaches only touch the dropdown for a real pitching change.
+  v629_half_pitchers <- reactiveVal(list(Top="",Bottom=""))
+  
+  v629_current_half <- function(){
+    h <- isolate(input$inning_half)
+    if(is.null(h) || !identical(as.character(h),"Bottom")) "Top" else "Bottom"
+  }
+  
+  # Whenever a pitcher is selected during a live game, remember them for
+  # the half-inning currently being played.
+  observeEvent(input$pitcher,{
+    if(identical(input$charting_mode,"Bullpen")) return()
+    p <- if(is.null(input$pitcher)) "" else trimws(as.character(input$pitcher))
+    if(!nzchar(p)) return()
+    half <- v629_current_half()
+    x <- v629_half_pitchers()
+    if(!identical(x[[half]],p)){
+      x[[half]] <- p
+      v629_half_pitchers(x)
+    }
+  },ignoreInit=TRUE)
+  
+  # When the half-inning flips, bring back that side's pitcher.
+  observeEvent(input$inning_half,{
+    if(identical(input$charting_mode,"Bullpen")) return()
+    half <- v629_current_half()
+    saved <- v629_half_pitchers()[[half]]
+    side_label <- if(identical(half,"Top")) "home" else "away"
+    if(!is.null(saved) && nzchar(saved)){
+      updateSelectInput(session,"pitcher",selected=saved)
+      showNotification(
+        paste0(half," half: pitcher switched to ",v628_player_label(saved),"."),
+        type="message",duration=4
+      )
+    } else {
+      showNotification(
+        paste0(half," half: select the ",side_label," team's pitcher before charting."),
+        type="warning",duration=8
+      )
+    }
+  },ignoreInit=TRUE)
+  
+  # A new session starts with no remembered pitchers.
+  observeEvent(input$session_select,{
+    v629_half_pitchers(list(Top="",Bottom=""))
+  },ignoreInit=TRUE)
+  
+  # Safety check used before every live pitch is saved. If this half has no
+  # remembered pitcher and the dropdown still shows the OTHER half's pitcher,
+  # the coach forgot to change pitchers, so block the save.
+  v629_pitcher_confirmed <- function(){
+    half <- v629_current_half()
+    other <- if(identical(half,"Top")) "Bottom" else "Top"
+    x <- v629_half_pitchers()
+    p <- if(is.null(input$pitcher)) "" else trimws(as.character(input$pitcher))
+    if(!nzchar(p)) return(FALSE)
+    if(nzchar(x[[half]])) return(TRUE)
+    if(nzchar(x[[other]]) && identical(x[[other]],p)) return(FALSE)
+    x[[half]] <- p
+    v629_half_pitchers(x)
+    TRUE
+  }
+  
+  # ==================================================
   # VALIDATION
   # ==================================================
   
@@ -13937,6 +14008,14 @@ server <- function(input, output, session) {
     if(!identical(input$charting_mode,"Bullpen")) {
       if(pa_complete()) return(FALSE)
       if(in_play_active()) return(FALSE)
+      if(!isTRUE(v629_pitcher_confirmed())) {
+        save_status(paste0(
+          "New half-inning: pick the ",
+          if(identical(v629_current_half(),"Top")) "home" else "away",
+          " team's pitcher in the Pitcher dropdown before charting."
+        ))
+        return(FALSE)
+      }
     }
     
     if (
@@ -14437,19 +14516,26 @@ server <- function(input, output, session) {
             selected_in_play_result()
           )
           
-        ),
-        
-        br(),
-        
-        
-        actionButton(
-          "complete_in_play_pa",
-          "SAVE + COMPLETE PA"
         )
         
       )
       
     })
+  
+  # V62.9: the Save button lives in its own spot BELOW the PA Extras box,
+  # so the flow reads top to bottom: contact -> result -> extras -> save.
+  output$v629_in_play_save_ui <- renderUI({
+    if(!in_play_active() || pa_complete()) return(NULL)
+    div(
+      style="margin:4px 0 14px 0;",
+      actionButton(
+        "complete_in_play_pa",
+        "SAVE + COMPLETE PA",
+        class="btn btn-primary",
+        style="font-weight:900;min-width:220px;"
+      )
+    )
+  })
   
   # ==================================================
   # COMPLETE IN PLAY PA
