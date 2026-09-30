@@ -14271,7 +14271,7 @@ server <- function(input, output, session) {
       div(
         class="quab-charting-grid",
         numericInput("pa_rbi","RBI",value=0,min=0,max=10,step=1),
-        checkboxInput("quab_barrel","Barrel",value=FALSE),
+        
         checkboxInput("quab_offensive_play","Successful Offensive Play",value=FALSE),
         checkboxInput("quab_move_runner_third","Moved Runner to 3rd (<2 outs)",value=FALSE)
       ),
@@ -14448,7 +14448,7 @@ server <- function(input, output, session) {
           div(
             class="quab-charting-grid",
             numericInput("pa_rbi","RBI",value=0,min=0,max=10,step=1),
-            checkboxInput("quab_barrel","Barrel",value=FALSE),
+            
             checkboxInput("quab_offensive_play","Successful Offensive Play",value=FALSE),
             checkboxInput("quab_move_runner_third","Moved Runner to 3rd (<2 outs)",value=FALSE)
           ),
