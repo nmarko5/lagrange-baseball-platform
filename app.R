@@ -6902,9 +6902,10 @@ server <- function(input, output, session) {
   # ==================================================
   
   observeEvent(
-    TRUE,
+    v6271_authenticated(),
     {
-      
+      if(!isTRUE(v6271_authenticated())) return()
+    
       try(v628_ensure_game_architecture(),silent=TRUE)
       try(v628_refresh_opponents(),silent=TRUE)
       load_sessions()
@@ -7129,7 +7130,8 @@ server <- function(input, output, session) {
       
     },
     
-    once = TRUE
+    once = TRUE,
+    ignoreInit = TRUE
   )
   
   # ==================================================
@@ -17435,7 +17437,8 @@ server <- function(input, output, session) {
   # ==================================================
   # STARTUP INITIALIZATION
   # ==================================================
-  observeEvent(TRUE,{
+  observeEvent(v6271_authenticated(),{
+    if(!isTRUE(v6271_authenticated())) return()
     # ==================================================
     # V59 FAST STARTUP
     # ==================================================
@@ -17459,7 +17462,7 @@ server <- function(input, output, session) {
     load_report_pitches()
     load_pitcher_report_data()
     
-  },once=TRUE)
+  },once=TRUE,ignoreInit=TRUE)
   
 }
 

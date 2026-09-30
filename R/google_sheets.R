@@ -399,9 +399,11 @@ gs_read_pitches <- function(
     
     sheet = "Pitches",
     
-    range = "A1:AC5001",
+    range = "A:AO",
     
-    col_names = TRUE
+    col_names = TRUE,
+    
+    guess_max = 10000
     
   )
   
