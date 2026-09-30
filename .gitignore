@@ -3,3 +3,14 @@
 
 .Rapp.history
 R/.Rapp.history
+# RStudio leftovers
+.Rhistory
+.RData
+
+# Never save passwords, keys, or login tokens
+.Renviron
+.httr-oauth
+.secrets/
+*service*account*.json
+*credentials*.json
+*key*.json

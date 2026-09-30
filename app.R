@@ -1,3 +1,6 @@
+# V62.8.6 — HITTER REPORT BACKEND READ FIX
+# Built directly from locked V62.7.5 production baseline.
+# Adds persistent opponent players, two game lineups, automatic batter rotation, substitutions, and faster BIP completion.
 # V62.7.5 — SECURE ORGANIZATION TRANSITION
 # Built directly from working V62.7.4. Keeps the platform covered until authenticated organization switching is complete.
 # V62.6.9 — LEGACY PITCHER DROPDOWN FIX
@@ -2048,6 +2051,14 @@ ui <- fluidPage(
       ),
       
       # ==================================================
+      # V62.8.1 — VISUAL TWO-TEAM GAME LINEUPS
+      # ==================================================
+      conditionalPanel(
+        condition="input.charting_mode != 'Bullpen'",
+        uiOutput("v628_game_lineups_ui")
+      ),
+      
+      # ==================================================
       # BATTER / PITCHER
       # ==================================================
       
@@ -2056,7 +2067,7 @@ ui <- fluidPage(
           width=6,
           conditionalPanel(
             condition="input.charting_mode != 'Bullpen'",
-            selectInput("batter","Batter",choices=NULL)
+            uiOutput("v628_manual_batter_ui")
           )
         ),
         column(
@@ -2084,27 +2095,6 @@ ui <- fluidPage(
             actionButton("bullpen_reset_target","RESET TARGET / LOCATION")
           )
         )
-      ),
-      
-      conditionalPanel(
-        condition="input.charting_mode != 'Bullpen'",
-        div(
-          class = "quab-charting-box",
-          div(class = "quab-charting-title", "QUAB / Offensive Play Tracking"),
-          div(
-            class = "quab-charting-grid",
-            numericInput("pa_rbi", "RBI", value = 0, min = 0, max = 10, step = 1),
-            checkboxInput("quab_barrel", "Barrel", value = FALSE),
-            checkboxInput("quab_offensive_play", "Successful Offensive Play", value = FALSE),
-            checkboxInput("quab_move_runner_third", "Moved Runner to 3rd (<2 outs)", value = FALSE)
-          ),
-          div(
-            class = "quab-charting-note",
-            "Automatically tracked QUAB criteria: Hit, Walk/HBP, RBI, 8+ pitch PA, 4+ pitches after reaching 2 strikes, and Reached on Error. ",
-            "Barrel is automatically credited whenever Contact Quality is charted as Hard. Use the manual tags only for successful offensive plays that are not already obvious from the PA result and moving a runner to third with fewer than two outs."
-          )
-        ),
-        
       ),
       
       # ==================================================
@@ -2208,6 +2198,8 @@ ui <- fluidPage(
       ),
       
       uiOutput("in_play_ui"),
+      
+      uiOutput("v628_pa_extras_bottom"),
       
       uiOutput("charting_message"),
       
@@ -3644,6 +3636,20 @@ server <- function(input, output, session) {
     data.frame()
   )
   
+  # V62.8 — two-team lineup / opponent state
+  v628_opponent_players <- reactiveVal(data.frame())
+  v628_away_lineup <- reactiveVal(character(0))
+  v628_home_lineup <- reactiveVal(character(0))
+  v628_away_index <- reactiveVal(1L)
+  v628_home_index <- reactiveVal(1L)
+  v628_one_pa_override <- reactiveVal("")
+  v628_lineups_ready <- reactiveVal(FALSE)
+  v628_lineup_editing <- reactiveVal(TRUE)
+  v628_away_team_type <- reactiveVal("Our")
+  v628_home_team_type <- reactiveVal("Our")
+  v628_away_team_name <- reactiveVal("LaGrange")
+  v628_home_team_name <- reactiveVal("LaGrange")
+  
   report_pitches <- reactiveVal(data.frame())
   report_plate_appearances <- reactiveVal(data.frame())
   report_load_error <- reactiveVal(NULL)
@@ -3758,6 +3764,32 @@ server <- function(input, output, session) {
   append_row_atomic <- function(sheet_name,values){
     googlesheets4::sheet_append(ss=SHEET_URL,data=one_row_df(values),sheet=sheet_name)
     invisible(TRUE)
+  }
+  
+  # ==================================================
+  # V62.8 — GAME / OPPONENT ARCHITECTURE
+  # ==================================================
+  v628_ensure_game_architecture <- function(){
+    existing <- googlesheets4::sheet_names(SHEET_URL)
+    specs <- list(
+      Opponent_Players=c("Opponent_Player_ID","Organization_ID","Opponent_Team","Display_Name","Jersey_Number","Bats","Throws","Active"),
+      Game_Lineups=c("Lineup_Record_ID","Organization_ID","Session_ID","Side","Team_Type","Team_Name","Lineup_Spot","Player_ID","Player_Source","Active","Created_At")
+    )
+    for(nm in names(specs)){
+      if(!nm %in% existing){
+        googlesheets4::sheet_add(SHEET_URL,nm)
+        cols<-specs[[nm]]
+        header<-as.data.frame(as.list(setNames(cols,cols)),stringsAsFactors=FALSE,check.names=FALSE)
+        googlesheets4::range_write(ss=SHEET_URL,data=header,sheet=nm,range=paste0("A1:",LETTERS[length(cols)],"1"),col_names=FALSE)
+      }
+    }
+    invisible(TRUE)
+  }
+  v628_read_sheet <- function(sheet_name, range=NULL){
+    tryCatch({
+      v628_ensure_game_architecture()
+      as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet=sheet_name,range=range,col_names=TRUE),stringsAsFactors=FALSE)
+    },error=function(e)data.frame(stringsAsFactors=FALSE))
   }
   v60_chr <- function(x,default=""){
     if(is.null(x)||length(x)==0)return(default)
@@ -5089,8 +5121,8 @@ server <- function(input, output, session) {
     v6271_authenticated(TRUE)
     
     # Re-apply feature + admin visibility after the organization switch.
-    try(v625_push_feature_visibility(),silent=TRUE)
-    try(v625_push_platform_admin_visibility(),silent=TRUE)
+    try(v62_push_feature_access(),silent=TRUE)
+    try(v625_push_platform_admin_access(),silent=TRUE)
     session$onFlushed(function(){
       session$sendCustomMessage("v6275HideTransition",list())
     },once=TRUE)
@@ -5109,6 +5141,7 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$setting_active_user,{
+    if(!isTRUE(v6271_authenticated())) return()
     if(isTRUE(v6271_authenticated()) &&
        nzchar(v6271_authenticated_org()) &&
        v6271_authenticated_org()!="LAGRANGE"){
@@ -5134,6 +5167,7 @@ server <- function(input, output, session) {
   },ignoreInit=TRUE)
   
   observeEvent(input$setting_active_user,{
+    if(!isTRUE(v6271_authenticated())) return()
     if(isTRUE(v6271_authenticated()) &&
        nzchar(v6271_authenticated_org()) &&
        v6271_authenticated_org()!="LAGRANGE"){
@@ -5906,7 +5940,7 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$org_import_preview,{
-    if(!identical(trimws(as.character(active_user_id())),"LAGRANGE_USER_NATE_MARKO")){
+    if(!isTRUE(v625_is_platform_admin())){
       org_import_message("Import error: Platform Admin access is required.")
       return()
     }
@@ -5932,7 +5966,7 @@ server <- function(input, output, session) {
   })
   
   observeEvent(input$org_import_execute,{
-    if(!identical(trimws(as.character(active_user_id())),"LAGRANGE_USER_NATE_MARKO")){
+    if(!isTRUE(v625_is_platform_admin())){
       org_import_message("Import error: Platform Admin access is required.")
       return()
     }
@@ -6025,17 +6059,20 @@ server <- function(input, output, session) {
   # ==================================================
   
   current_batter_id <- function() {
-    
-    if (
-      is.null(input$batter) ||
-      input$batter == ""
-    ) {
-      return(NULL)
+    # V62.8: lineup-driven batter takes priority in Live mode.
+    if(!identical(input$charting_mode,"Bullpen") && isTRUE(v628_lineups_ready())){
+      half<-if(is.null(input$inning_half))"Top"else as.character(input$inning_half)
+      lineup<-if(identical(half,"Bottom"))v628_home_lineup()else v628_away_lineup()
+      idx<-if(identical(half,"Bottom"))v628_home_index()else v628_away_index()
+      if(length(lineup)>0){
+        idx<-max(1L,min(as.integer(idx),length(lineup)))
+        return(as.character(lineup[[idx]]))
+      }
     }
-    
+    if (is.null(input$batter) || input$batter == "") return(NULL)
     input$batter
-    
   }
+  
   
   current_batter_side <- function() {
     
@@ -6061,14 +6098,16 @@ server <- function(input, output, session) {
       drop = FALSE
     ]
     
-    if (
-      nrow(batter_row) == 0 ||
-      is.na(batter_row$Bats[1])
-    ) {
-      return("")
+    if (nrow(batter_row) > 0 && !is.na(batter_row$Bats[1])) {
+      return(as.character(batter_row$Bats[1]))
     }
-    
-    as.character(batter_row$Bats[1])
+    # V62.8 opponent hitters use the persistent opponent directory.
+    opp<-v628_opponent_players()
+    if(nrow(opp)>0 && all(c("Opponent_Player_ID","Bats")%in%names(opp))){
+      z<-opp[as.character(opp$Opponent_Player_ID)==as.character(batter_id),,drop=FALSE]
+      if(nrow(z)>0 && !is.na(z$Bats[1]))return(as.character(z$Bats[1]))
+    }
+    ""
     
   }
   
@@ -6866,6 +6905,8 @@ server <- function(input, output, session) {
     TRUE,
     {
       
+      try(v628_ensure_game_architecture(),silent=TRUE)
+      try(v628_refresh_opponents(),silent=TRUE)
       load_sessions()
       
       tryCatch(
@@ -10298,43 +10339,39 @@ server <- function(input, output, session) {
   # ==================================================
   
   load_report_pitches <- function() {
+    # V62.8.6: use the platform's established dynamic Pitches reader.
+    # Do not request a fixed row range beyond the Pitches sheet grid size.
+    tryCatch({
+      pitches_data <- gs_read_pitches(sheet_url = SHEET_URL)
+      pitches_data <- v49_normalize_sheet_data(
+        as.data.frame(pitches_data, stringsAsFactors = FALSE),
+        "pitches"
+      )
+      pitches_data <- v6273_scope_org(pitches_data)
+      report_pitches(pitches_data)
+      sessions_admin_pitches(pitches_data)
+      report_load_error(NULL)
+    }, error=function(e){
+      report_pitches(data.frame())
+      report_load_error(e$message)
+    })
     
-    tryCatch(
-      {
-        pitches_data <- v6273_scope_org(sessions_admin_pitches())
-        if(is.null(pitches_data)) pitches_data <- data.frame()
-        
-        report_pitches(
-          v49_normalize_sheet_data(
-            as.data.frame(pitches_data, stringsAsFactors = FALSE),
-            "pitches"
-          )
-        )
-        
-        report_load_error(NULL)
-      },
-      error = function(e) {
-        report_pitches(data.frame())
-        report_load_error(e$message)
-      }
-    )
-    
-    tryCatch(
-      {
-        pa_data <- v6273_scope_org(sessions_admin_pas())
-        if(is.null(pa_data)) pa_data <- data.frame()
-        
-        report_plate_appearances(
-          v49_normalize_sheet_data(
-            as.data.frame(pa_data, stringsAsFactors = FALSE),
-            "pa"
-          )
-        )
-      },
-      error = function(e) {
-        report_plate_appearances(data.frame())
-      }
-    )
+    tryCatch({
+      pa_data <- googlesheets4::range_read(
+        ss = SHEET_URL,
+        sheet = "Plate_Appearances",
+        col_names = TRUE
+      )
+      pa_data <- v49_normalize_sheet_data(
+        as.data.frame(pa_data, stringsAsFactors = FALSE),
+        "pa"
+      )
+      pa_data <- v6273_scope_org(pa_data)
+      report_plate_appearances(pa_data)
+      sessions_admin_pas(pa_data)
+    }, error=function(e){
+      report_plate_appearances(data.frame())
+    })
   }
   
   observeEvent(input$report_batter, {
@@ -13593,6 +13630,276 @@ server <- function(input, output, session) {
     })
   
   # ==================================================
+  # V62.8.1 — VISUAL LINEUP / OPPONENT SERVER
+  # ==================================================
+  v628_player_label <- function(id){
+    id<-as.character(id); p<-player_lookup(); o<-v628_opponent_players()
+    if(nrow(p)>0 && "Player_ID"%in%names(p)){
+      z<-p[as.character(p$Player_ID)==id,,drop=FALSE]
+      if(nrow(z)>0){
+        nm<-if("Display_Name"%in%names(z))as.character(z$Display_Name[1])else id
+        return(nm)
+      }
+    }
+    if(nrow(o)>0 && "Opponent_Player_ID"%in%names(o)){
+      z<-o[as.character(o$Opponent_Player_ID)==id,,drop=FALSE]
+      if(nrow(z)>0)return(as.character(z$Display_Name[1]))
+    }
+    id
+  }
+  v628_choices_for <- function(team_type,team_name){
+    if(identical(team_type,"Our")){
+      p<-player_lookup(); if(nrow(p)==0||!"Player_ID"%in%names(p))return(character(0))
+      nm<-if("Display_Name"%in%names(p))as.character(p$Display_Name)else as.character(p$Player_ID)
+      out<-as.character(p$Player_ID); names(out)<-nm; return(out)
+    }
+    o<-v628_opponent_players(); if(nrow(o)==0)return(character(0))
+    if("Organization_ID"%in%names(o))o<-o[trimws(as.character(o$Organization_ID))==current_org_id(),,drop=FALSE]
+    if(nzchar(trimws(team_name))&&"Opponent_Team"%in%names(o))o<-o[tolower(trimws(as.character(o$Opponent_Team)))==tolower(trimws(team_name)),,drop=FALSE]
+    if(nrow(o)==0)return(character(0))
+    out<-as.character(o$Opponent_Player_ID); names(out)<-paste0(ifelse(is.na(o$Jersey_Number)||o$Jersey_Number=="","",paste0("#",o$Jersey_Number," ")),o$Display_Name); out
+  }
+  v628_refresh_opponents <- function(){
+    d<-v628_read_sheet("Opponent_Players","A1:H5000")
+    if(nrow(d)>0&&"Organization_ID"%in%names(d))d<-d[trimws(as.character(d$Organization_ID))==current_org_id(),,drop=FALSE]
+    v628_opponent_players(d)
+  }
+  v628_refresh_lineup_choices <- function(){
+    allc<-c(v628_choices_for("Our",""),v628_choices_for("Opponent",""))
+    current_p<-if(is.null(input$pitcher))""else as.character(input$pitcher)
+    updateSelectInput(session,"pitcher",choices=c("Select Pitcher"="",allc),selected=current_p)
+  }
+  observeEvent(list(input$v628_away_type,input$v628_away_name,input$v628_home_type,input$v628_home_name),{v628_refresh_lineup_choices()},ignoreInit=TRUE)
+  observeEvent(input$v628_add_opp_player,{
+    req(trimws(input$v628_opp_team)!="",trimws(input$v628_opp_player_name)!="")
+    tryCatch({
+      v628_ensure_game_architecture()
+      uid<-unique_record_id("P")
+      oid<-paste0("OPP_",v60_slug(input$v628_opp_team),"_",v60_slug(input$v628_opp_player_name),"_",substr(uid,max(1,nchar(uid)-5),nchar(uid)))
+      append_row_atomic("Opponent_Players",list(oid,current_org_id(),trimws(input$v628_opp_team),trimws(input$v628_opp_player_name),trimws(input$v628_opp_jersey),input$v628_opp_bats,"","TRUE"))
+      v628_refresh_opponents(); v628_refresh_lineup_choices(); save_status(paste0("Added opponent player: ",trimws(input$v628_opp_player_name)))
+    },error=function(e)save_status(paste0("Opponent player error: ",e$message)))
+  })
+  v628_write_lineup_side <- function(side,team_type,team_name,lineup){
+    if(length(lineup)==0)return(invisible(TRUE))
+    for(i in seq_along(lineup)){
+      append_row_atomic("Game_Lineups",list(unique_record_id("LINEUP"),current_org_id(),current_session_id(),side,team_type,team_name,i,as.character(lineup[[i]]),ifelse(team_type=="Our","Organization","Opponent"),"TRUE",format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
+    }
+  }
+  observeEvent(input$v628_save_lineups,{
+    req(current_session_id())
+    away<-v628_collect_lineup_slots("Away"); home<-v628_collect_lineup_slots("Home")
+    if(length(away)==0||length(home)==0){save_status("Add at least one hitter to both lineups before saving.");return()}
+    tryCatch({
+      v628_ensure_game_architecture()
+      v628_write_lineup_side("Away",input$v628_away_type,trimws(input$v628_away_name),away)
+      v628_write_lineup_side("Home",input$v628_home_type,trimws(input$v628_home_name),home)
+      v628_away_lineup(away);v628_home_lineup(home);v628_away_index(1L);v628_home_index(1L);v628_one_pa_override("")
+      v628_away_team_type(v60_chr(input$v628_away_type,"Our"));v628_home_team_type(v60_chr(input$v628_home_type,"Our"))
+      v628_away_team_name(v60_chr(input$v628_away_name,"Away"));v628_home_team_name(v60_chr(input$v628_home_name,"Home"))
+      v628_lineups_ready(TRUE);v628_lineup_editing(FALSE)
+      v628_view_side_state(if(identical(input$inning_half,"Bottom"))"Home"else"Away")
+      save_status("Lineups saved. Automatic batter rotation is ON.")
+    },error=function(e)save_status(paste0("Lineup save error: ",e$message)))
+  })
+  observeEvent(input$v628_edit_lineups,{v628_lineup_editing(TRUE); v628_refresh_lineup_choices()})
+  observeEvent(input$v628_cancel_edit,{v628_lineup_editing(FALSE)})
+  
+  v628_advance_batter <- function(direction=1L){
+    half<-if(is.null(input$inning_half))"Top"else as.character(input$inning_half)
+    lineup<-if(identical(half,"Bottom"))v628_home_lineup()else v628_away_lineup()
+    if(length(lineup)==0)return()
+    old<-if(identical(half,"Bottom"))v628_home_index()else v628_away_index()
+    ni<-((as.integer(old)-1L+as.integer(direction))%%length(lineup))+1L
+    if(identical(half,"Bottom"))v628_home_index(ni)else v628_away_index(ni)
+  }
+  observeEvent(input$v628_prev_batter,{v628_advance_batter(-1L)})
+  observeEvent(input$v628_next_batter,{v628_advance_batter(1L)})
+  
+  v628_active_lineup_info <- reactive({
+    half<-if(is.null(input$inning_half))"Top"else as.character(input$inning_half)
+    is_home<-identical(half,"Bottom")
+    lineup<-if(is_home)v628_home_lineup()else v628_away_lineup()
+    idx<-if(is_home)v628_home_index()else v628_away_index()
+    team<-if(is_home)v628_home_team_name()else v628_away_team_name()
+    list(half=half,side=if(is_home)"Home"else"Away",lineup=lineup,index=idx,team=team)
+  })
+  
+  v628_lineup_rows <- function(lineup,current_index=NA_integer_){
+    if(length(lineup)==0)return(div(class="admin-note","No hitters in this lineup."))
+    tagList(lapply(seq_along(lineup),function(i){
+      active<-is.finite(current_index)&&i==current_index
+      ondeck<-is.finite(current_index)&&i==((current_index%%length(lineup))+1L)
+      div(
+        style=paste0("display:flex;align-items:center;gap:10px;padding:7px 10px;margin:3px 0;border-radius:8px;border:1px solid ",if(active)"var(--org-primary)"else"#e5e7eb",";background:",if(active)"rgba(160,0,0,.055)"else"#fff",";min-height:42px;"),
+        div(style=paste0("width:27px;height:27px;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:900;flex:0 0 27px;",if(active)"background:var(--org-primary);color:#fff;"else"background:#f1f3f5;color:#555;"),i),
+        div(style="flex:1;font-size:15px;font-weight:800;line-height:1.1;",v628_player_label(lineup[[i]])),
+        if(active)span(style="font-size:10px;font-weight:900;color:var(--org-primary);text-transform:uppercase;letter-spacing:.25px;","AT BAT") else if(ondeck)span(style="font-size:10px;font-weight:800;color:#777;text-transform:uppercase;letter-spacing:.25px;","ON DECK") else NULL
+      )
+    }))
+  }
+  
+  v628_lineup_card_builder <- function(side){
+    is_home <- identical(side,"Home")
+    prefix <- if(is_home)"v628_home_slot_" else "v628_away_slot_"
+    team_type <- if(is_home)v60_chr(input$v628_home_type,v628_home_team_type()) else v60_chr(input$v628_away_type,v628_away_team_type())
+    team_name <- if(is_home)v60_chr(input$v628_home_name,v628_home_team_name()) else v60_chr(input$v628_away_name,v628_away_team_name())
+    current <- if(is_home)v628_home_lineup() else v628_away_lineup()
+    choices <- v628_choices_for(team_type,team_name)
+    tagList(lapply(seq_len(12L),function(i){
+      selected <- if(i<=length(current))as.character(current[[i]])else""
+      div(
+        style="display:grid;grid-template-columns:42px minmax(0,1fr);align-items:center;gap:8px;margin-bottom:6px;",
+        div(style="height:38px;border-radius:8px;background:#f1f3f5;display:flex;align-items:center;justify-content:center;font-weight:900;color:#555;",i),
+        selectInput(paste0(prefix,i),label=NULL,choices=c("— Empty —"="",choices),selected=selected,selectize=TRUE,width="100%")
+      )
+    }))
+  }
+  v628_collect_lineup_slots <- function(side){
+    prefix <- if(identical(side,"Home"))"v628_home_slot_" else "v628_away_slot_"
+    vals <- vapply(seq_len(12L),function(i){
+      x<-input[[paste0(prefix,i)]]
+      if(is.null(x))""else trimws(as.character(x))
+    },character(1))
+    vals[nzchar(vals)]
+  }
+  
+  output$v628_game_lineups_ui <- renderUI({
+    if(!isTRUE(v628_lineups_ready()) || isTRUE(v628_lineup_editing())){
+      return(div(class="game-state-box",
+                 div(class="game-state-title","Game Lineups"),
+                 div(class="admin-note","Build both batting orders before the game. Away bats in the TOP half; Home bats in the BOTTOM half."),
+                 fluidRow(
+                   column(6,
+                          selectInput("v628_away_type","Away Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=v628_away_team_type()),
+                          textInput("v628_away_name","Away Team Name",value=v628_away_team_name()),
+                          div(style="font-weight:900;font-size:16px;margin:8px 0 7px;","Away Batting Order"),
+                          div(style="border:1px solid #d9dde3;border-radius:11px;padding:10px;background:#fff;",v628_lineup_card_builder("Away"))
+                   ),
+                   column(6,
+                          selectInput("v628_home_type","Home Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=v628_home_team_type()),
+                          textInput("v628_home_name","Home Team Name",value=v628_home_team_name()),
+                          div(style="font-weight:900;font-size:16px;margin:8px 0 7px;","Home Batting Order"),
+                          div(style="border:1px solid #d9dde3;border-radius:11px;padding:10px;background:#fff;",v628_lineup_card_builder("Home"))
+                   )
+                 ),
+                 div(class="admin-toolbar",actionButton("v628_save_lineups",if(isTRUE(v628_lineups_ready()))"SAVE CHANGES"else"SAVE LINEUPS"),if(isTRUE(v628_lineups_ready()))actionButton("v628_cancel_edit","CANCEL")else NULL),
+                 tags$details(
+                   tags$summary(style="font-weight:800;cursor:pointer;margin-top:12px;","ADD OPPONENT PLAYER"),
+                   fluidRow(column(4,textInput("v628_opp_team","Opponent Team",placeholder="Example: Huntingdon")),column(4,textInput("v628_opp_player_name","Player Name",placeholder="First Last")),column(2,textInput("v628_opp_jersey","#",placeholder="12")),column(2,selectInput("v628_opp_bats","Bats",choices=c("R","L","S")))),
+                   actionButton("v628_add_opp_player","ADD PLAYER")
+                 )
+      ))
+    }
+    active<-v628_active_lineup_info()
+    selected_side<-v628_view_side_state()
+    div(class="game-state-box",
+        tags$style(HTML(".v628-side-active{background:var(--org-primary)!important;color:#fff!important;font-weight:900!important;border:none!important;box-shadow:none!important}.v628-side-idle{background:transparent!important;color:#667085!important;font-weight:800!important;border:none!important;box-shadow:none!important}.v628-side-active:hover,.v628-side-active:focus{color:#fff!important}.v628-side-idle:hover,.v628-side-idle:focus{background:#e3e6ea!important;color:#333!important}")),
+        div(style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;",
+            div(class="game-state-title","Lineups"),
+            actionButton("v628_edit_lineups","EDIT LINEUPS",class="btn btn-default btn-sm")
+        ),
+        div(style="max-width:620px;",
+            div(style="display:grid;grid-template-columns:1fr 1fr;background:#eef0f3;border-radius:11px;padding:4px;margin-bottom:8px;",
+                actionButton("v628_view_away","AWAY",class=if(identical(selected_side,"Away"))"btn v628-side-active" else "btn v628-side-idle"),
+                actionButton("v628_view_home","HOME",class=if(identical(selected_side,"Home"))"btn v628-side-active" else "btn v628-side-idle")
+            ),
+            uiOutput("v628_visual_lineup")
+        ),
+        uiOutput("v628_current_batter_card")
+    )
+  })
+  v628_view_side_state <- reactiveVal("Away")
+  observeEvent(input$v628_view_away,{v628_view_side_state("Away")})
+  observeEvent(input$v628_view_home,{v628_view_side_state("Home")})
+  output$v628_visual_lineup <- renderUI({
+    side<-v628_view_side_state()
+    if(identical(side,"Home")){
+      lineup<-v628_home_lineup(); idx<-if(identical(v628_active_lineup_info()$side,"Home"))v628_home_index()else NA_integer_; team<-v628_home_team_name()
+    } else {
+      lineup<-v628_away_lineup(); idx<-if(identical(v628_active_lineup_info()$side,"Away"))v628_away_index()else NA_integer_; team<-v628_away_team_name()
+    }
+    div(style="margin-top:4px;",div(style="font-size:17px;font-weight:900;margin-bottom:5px;",paste0(toupper(team)," — ",toupper(side))),v628_lineup_rows(lineup,idx))
+  })
+  observeEvent(input$inning_half,{
+    if(isTRUE(v628_lineups_ready()))v628_view_side_state(if(identical(input$inning_half,"Bottom"))"Home"else"Away")
+  },ignoreInit=TRUE)
+  
+  output$v628_current_batter_card<-renderUI({
+    if(!isTRUE(v628_lineups_ready()))return(NULL)
+    x<-v628_active_lineup_info(); lineup<-x$lineup; idx<-x$index
+    if(length(lineup)==0)return(NULL); idx<-max(1L,min(as.integer(idx),length(lineup))); nxt<-(idx%%length(lineup))+1L
+    div(style="margin-top:11px;max-width:620px;padding:12px 14px;border:2px solid var(--org-primary);border-radius:11px;background:#fff;",
+        div(style="font-size:11px;font-weight:900;text-transform:uppercase;color:var(--org-primary);letter-spacing:.25px;",paste0(toupper(x$half)," ",ifelse(is.null(input$inning_number),"",input$inning_number)," • ",toupper(x$team)," BATTING")),
+        div(style="display:flex;align-items:end;justify-content:space-between;gap:12px;flex-wrap:wrap;",
+            div(
+              div(style="font-size:25px;font-weight:900;line-height:1.08;margin-top:3px;",v628_player_label(lineup[[idx]])),
+              div(style="margin-top:4px;color:#666;font-size:13px;",paste0("Spot ",idx," • On deck: ",v628_player_label(lineup[[nxt]])))
+            ),
+            div(style="display:flex;gap:6px;align-items:center;",
+                actionButton("v628_prev_batter","‹",title="Correction: previous batter",class="btn btn-default btn-sm"),
+                actionButton("v628_open_sub","SUB",class="btn btn-default btn-sm"),
+                actionButton("v628_next_batter","›",title="Correction: next batter",class="btn btn-default btn-sm")
+            )
+        )
+    )
+  })
+  output$v628_manual_batter_ui <- renderUI({
+    if(isTRUE(v628_lineups_ready()))return(NULL)
+    selectInput("batter","Batter",choices=NULL)
+  })
+  
+  observeEvent(input$v628_open_sub,{
+    x<-v628_active_lineup_info(); req(length(x$lineup)>0)
+    idx<-max(1L,min(as.integer(x$index),length(x$lineup)))
+    team_type<-if(identical(x$side,"Home"))v628_home_team_type()else v628_away_team_type()
+    team_name<-x$team
+    choices<-v628_choices_for(team_type,team_name)
+    showModal(modalDialog(
+      title=paste0("Substitute — ",x$team," lineup spot ",idx),
+      div(style="margin-bottom:10px;color:#666;",paste0("Replacing: ",v628_player_label(x$lineup[[idx]]))),
+      selectInput("v628_sub_player_modal","New Player",choices=c("Select player"="",choices)),
+      footer=tagList(modalButton("CANCEL"),actionButton("v628_confirm_sub","CONFIRM SUB",class="btn-primary")),easyClose=TRUE
+    ))
+  })
+  observeEvent(input$v628_confirm_sub,{
+    id<-trimws(as.character(input$v628_sub_player_modal));if(!nzchar(id))return()
+    x<-v628_active_lineup_info(); if(length(x$lineup)==0)return(); idx<-max(1L,min(as.integer(x$index),length(x$lineup)))
+    if(identical(x$side,"Home")){z<-v628_home_lineup();z[idx]<-id;v628_home_lineup(z);team_type<-v628_home_team_type()}else{z<-v628_away_lineup();z[idx]<-id;v628_away_lineup(z);team_type<-v628_away_team_type()}
+    try(append_row_atomic("Game_Lineups",list(unique_record_id("LINEUP"),current_org_id(),current_session_id(),x$side,team_type,x$team,idx,id,ifelse(team_type=="Our","Organization","Opponent"),"TRUE",format(Sys.time(),"%Y-%m-%d %H:%M:%S"))),silent=TRUE)
+    removeModal(); save_status(paste0("Permanent substitution: ",v628_player_label(id)," now owns lineup spot ",idx,"."))
+  })
+  
+  v628_reset_pa_state <- function(increment_pa=TRUE){
+    balls(0);strikes(0);pa_complete(FALSE);pa_result(NULL);last_pitch_result("None");selected_pitch_type("None");selected_zone(NULL);selected_location_x(NULL);selected_location_y(NULL);in_play_active(FALSE);selected_contact_quality(NULL);selected_in_play_result(NULL);pa_pitch_count(0);pitches_after_2k(0)
+    updateNumericInput(session,"pa_rbi",value=0);updateCheckboxInput(session,"quab_barrel",value=FALSE);updateCheckboxInput(session,"quab_offensive_play",value=FALSE);updateCheckboxInput(session,"quab_move_runner_third",value=FALSE)
+    if(isTRUE(increment_pa))pa_number(pa_number()+1)
+  }
+  observeEvent(pa_complete(),{
+    if(isTRUE(pa_complete()) && isTRUE(v628_lineups_ready()) && !identical(input$charting_mode,"Bullpen")){
+      v628_advance_batter(1L);v628_reset_pa_state(TRUE)
+    }
+  },ignoreInit=TRUE)
+  observeEvent(input$session_select,{
+    v628_lineups_ready(FALSE);v628_lineup_editing(TRUE);v628_away_lineup(character(0));v628_home_lineup(character(0));v628_away_index(1L);v628_home_index(1L);v628_one_pa_override("")
+    v628_away_team_type("Our");v628_home_team_type("Our");v628_away_team_name("LaGrange");v628_home_team_name("LaGrange")
+    tryCatch({
+      v628_refresh_opponents(); d<-v628_read_sheet("Game_Lineups","A1:K10000")
+      if(nrow(d)>0&&all(c("Session_ID","Side","Lineup_Spot","Player_ID")%in%names(d))){
+        d<-d[as.character(d$Session_ID)==as.character(current_session_id()),,drop=FALSE]
+        if(nrow(d)>0){
+          d$Lineup_Spot<-suppressWarnings(as.integer(d$Lineup_Spot));d$.row_order<-seq_len(nrow(d));d<-d[order(d$Side,d$Lineup_Spot,d$.row_order),,drop=FALSE]
+          a<-d[d$Side=="Away",,drop=FALSE];h<-d[d$Side=="Home",,drop=FALSE]
+          if(nrow(a)>0){a<-a[!duplicated(a$Lineup_Spot,fromLast=TRUE),,drop=FALSE];a<-a[order(a$Lineup_Spot),];v628_away_lineup(as.character(a$Player_ID));v628_away_team_type(as.character(tail(a$Team_Type,1)));v628_away_team_name(as.character(tail(a$Team_Name,1)))}
+          if(nrow(h)>0){h<-h[!duplicated(h$Lineup_Spot,fromLast=TRUE),,drop=FALSE];h<-h[order(h$Lineup_Spot),];v628_home_lineup(as.character(h$Player_ID));v628_home_team_type(as.character(tail(h$Team_Type,1)));v628_home_team_name(as.character(tail(h$Team_Name,1)))}
+          if(length(v628_away_lineup())>0&&length(v628_home_lineup())>0){v628_lineups_ready(TRUE);v628_lineup_editing(FALSE)}
+        }
+      }
+      v628_refresh_lineup_choices()
+    },error=function(e){})
+  },ignoreInit=TRUE,priority=20)
+  
+  # ==================================================
   # VALIDATION
   # ==================================================
   
@@ -13916,81 +14223,44 @@ server <- function(input, output, session) {
   )
   
   # ==================================================
-  # CONTACT QUALITY
+  # CONTACT QUALITY + FAST BIP WORKFLOW (V62.8)
   # ==================================================
+  v628_try_complete_in_play <- function(){
+    if(!in_play_active()||is.null(selected_contact_quality())||is.null(selected_in_play_result()))return(FALSE)
+    ok<-save_pitch_to_sheet("In Play",selected_contact_quality(),selected_in_play_result())
+    if(!isTRUE(ok))return(FALSE)
+    okpa<-save_pa_to_sheet(selected_in_play_result())
+    if(!isTRUE(okpa))return(FALSE)
+    pa_result(selected_in_play_result());pa_complete(TRUE);TRUE
+  }
+  observeEvent(input$contact_hard,{selected_contact_quality("Hard")})
+  observeEvent(input$contact_average,{selected_contact_quality("Average")})
+  observeEvent(input$contact_weak,{selected_contact_quality("Weak")})
+  observeEvent(input$pa_single,{selected_in_play_result("Single")})
+  observeEvent(input$pa_double,{selected_in_play_result("Double")})
+  observeEvent(input$pa_triple,{selected_in_play_result("Triple")})
+  observeEvent(input$pa_home_run,{selected_in_play_result("Home Run")})
+  observeEvent(input$pa_out,{selected_in_play_result("Out")})
+  observeEvent(input$pa_error,{selected_in_play_result("Reached on Error")})
+  observeEvent(input$pa_fc,{selected_in_play_result("Fielder's Choice")})
+  observeEvent(input$pa_sac_fly,{selected_in_play_result("Sac Fly")})
+  observeEvent(input$pa_sac_bunt,{selected_in_play_result("Sac Bunt")})
   
-  observeEvent(
-    input$contact_hard,
-    {
-      selected_contact_quality(
-        "Hard"
-      )
-    }
-  )
-  
-  observeEvent(
-    input$contact_average,
-    {
-      selected_contact_quality(
-        "Average"
-      )
-    }
-  )
-  
-  observeEvent(
-    input$contact_weak,
-    {
-      selected_contact_quality(
-        "Weak"
-      )
-    }
-  )
-  
-  # ==================================================
-  # IN PLAY RESULTS
-  # ==================================================
-  
-  observeEvent(input$pa_single, {
-    selected_in_play_result("Single")
-  })
-  
-  observeEvent(input$pa_double, {
-    selected_in_play_result("Double")
-  })
-  
-  observeEvent(input$pa_triple, {
-    selected_in_play_result("Triple")
-  })
-  
-  observeEvent(input$pa_home_run, {
-    selected_in_play_result("Home Run")
-  })
-  
-  observeEvent(input$pa_out, {
-    selected_in_play_result("Out")
-  })
-  
-  observeEvent(input$pa_error, {
-    selected_in_play_result(
-      "Reached on Error"
-    )
-  })
-  
-  observeEvent(input$pa_fc, {
-    selected_in_play_result(
-      "Fielder's Choice"
-    )
-  })
-  
-  observeEvent(input$pa_sac_fly, {
-    selected_in_play_result(
-      "Sac Fly"
-    )
-  })
-  
-  observeEvent(input$pa_sac_bunt, {
-    selected_in_play_result(
-      "Sac Bunt"
+  output$v628_pa_extras_bottom <- renderUI({
+    if(identical(input$charting_mode,"Bullpen") || isTRUE(in_play_active()) || isTRUE(pa_complete()))return(NULL)
+    div(
+      class="quab-charting-box",
+      style="margin-top:18px;",
+      div(class="quab-charting-title","PA EXTRAS / QUAB TRACKING"),
+      div(
+        class="quab-charting-grid",
+        numericInput("pa_rbi","RBI",value=0,min=0,max=10,step=1),
+        checkboxInput("quab_barrel","Barrel",value=FALSE),
+        checkboxInput("quab_offensive_play","Successful Offensive Play",value=FALSE),
+        checkboxInput("quab_move_runner_third","Moved Runner to 3rd (<2 outs)",value=FALSE)
+      ),
+      div(class="quab-charting-note",
+          "Hits, Walk/HBP, RBI, 8+ pitch PA, 4+ pitches after reaching 2 strikes, Reached on Error, and Hard-contact barrels are tracked automatically. Use these controls only when the PA needs an extra manual tag.")
     )
   })
   
@@ -14155,9 +14425,24 @@ server <- function(input, output, session) {
         
         br(),
         
+        div(
+          class="quab-charting-box",
+          style="margin-top:10px;margin-bottom:12px;",
+          div(class="quab-charting-title","PA EXTRAS / QUAB TRACKING"),
+          div(
+            class="quab-charting-grid",
+            numericInput("pa_rbi","RBI",value=0,min=0,max=10,step=1),
+            checkboxInput("quab_barrel","Barrel",value=FALSE),
+            checkboxInput("quab_offensive_play","Successful Offensive Play",value=FALSE),
+            checkboxInput("quab_move_runner_third","Moved Runner to 3rd (<2 outs)",value=FALSE)
+          ),
+          div(class="quab-charting-note",
+              "Hard contact automatically credits Barrel. Check any extra items that apply before saving the PA.")
+        ),
+        
         actionButton(
           "complete_in_play_pa",
-          "COMPLETE PA"
+          "SAVE + COMPLETE PA"
         )
         
       )
@@ -14192,28 +14477,7 @@ server <- function(input, output, session) {
         return()
       }
       
-      save_pitch_to_sheet(
-        
-        pitch_result =
-          "In Play",
-        
-        contact_quality =
-          selected_contact_quality(),
-        
-        pa_result_on_pitch =
-          selected_in_play_result()
-        
-      )
-      
-      save_pa_to_sheet(
-        selected_in_play_result()
-      )
-      
-      pa_result(
-        selected_in_play_result()
-      )
-      
-      pa_complete(TRUE)
+      v628_try_complete_in_play()
       
     }
   )
@@ -14326,6 +14590,12 @@ server <- function(input, output, session) {
     renderUI({
       
       if (!pa_complete()) {
+        return(NULL)
+      }
+      
+      # V62.8.5: automatic lineup mode advances to the next hitter itself.
+      # Do not render the old PA COMPLETE / NEW PA card in this mode.
+      if (isTRUE(v628_lineups_ready()) && !identical(input$charting_mode, "Bullpen")) {
         return(NULL)
       }
       
@@ -15569,51 +15839,9 @@ server <- function(input, output, session) {
   # NEW PA
   # ==================================================
   
-  observeEvent(
-    input$new_pa,
-    {
-      
-      balls(0)
-      strikes(0)
-      
-      pa_complete(FALSE)
-      pa_result(NULL)
-      
-      last_pitch_result(
-        "None"
-      )
-      
-      selected_pitch_type(
-        "None"
-      )
-      
-      selected_zone(NULL)
-      selected_location_x(NULL)
-      selected_location_y(NULL)
-      
-      in_play_active(FALSE)
-      
-      selected_contact_quality(
-        NULL
-      )
-      
-      selected_in_play_result(
-        NULL
-      )
-      
-      pa_pitch_count(0)
-      pitches_after_2k(0)
-      updateNumericInput(session,"pa_rbi",value=0)
-      updateCheckboxInput(session,"quab_barrel",value=FALSE)
-      updateCheckboxInput(session,"quab_offensive_play",value=FALSE)
-      updateCheckboxInput(session,"quab_move_runner_third",value=FALSE)
-      
-      pa_number(
-        pa_number() + 1
-      )
-      
-    }
-  )
+  observeEvent(input$new_pa,{
+    v628_reset_pa_state(TRUE)
+  })
   
   
   # ==================================================
@@ -17219,9 +17447,6 @@ server <- function(input, output, session) {
     load_organizations()
     load_user_directory()
     
-    if(identical(trimws(as.character(active_user_id())),"LAGRANGE_USER_NATE_MARKO")){
-      platform_owner_session(TRUE)
-    }
     
     load_season_architecture()
     load_entitlements()
