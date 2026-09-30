@@ -13667,7 +13667,21 @@ server <- function(input, output, session) {
     v628_opponent_players(d)
   }
   v628_refresh_lineup_choices <- function(){
-    allc<-c(v628_choices_for("Our",""),v628_choices_for("Opponent",""))
+    # Our side: only pitchers and two-way players.
+    p <- v6265_normalize_player_schema(player_lookup())
+    our <- character(0)
+    if(nrow(p)>0 && "Player_ID"%in%names(p)){
+      type_l <- tolower(trimws(as.character(p$Player_Type)))
+      p <- p[type_l %in% c("pitcher","two-way","two way","twoway"),,drop=FALSE]
+      if(nrow(p)>0){
+        nm <- if("Display_Name"%in%names(p)) as.character(p$Display_Name) else as.character(p$Player_ID)
+        our <- as.character(p$Player_ID)
+        names(our) <- nm
+      }
+    }
+    # Opponent side: positions aren't stored for opponents, so include them all.
+    opp <- v628_choices_for("Opponent","")
+    allc <- c(our, opp)
     current_p<-if(is.null(input$pitcher))""else as.character(input$pitcher)
     updateSelectInput(session,"pitcher",choices=c("Select Pitcher"="",allc),selected=current_p)
   }
