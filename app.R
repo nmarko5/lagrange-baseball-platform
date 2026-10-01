@@ -13687,7 +13687,7 @@ server <- function(input, output, session) {
     current_p<-if(is.null(input$pitcher))""else as.character(input$pitcher)
     updateSelectInput(session,"pitcher",choices=c("Select Pitcher"="",allc),selected=current_p)
   }
-  observeEvent(list(input$v628_away_type,input$v628_away_name,input$v628_home_type,input$v628_home_name),{v628_refresh_lineup_choices()},ignoreInit=TRUE)
+  observeEvent(list(input$v628_away_type,input$v628_home_type),{v628_refresh_lineup_choices()},ignoreInit=TRUE)
   observeEvent(input$v628_add_opp_player,{
     req(trimws(input$v628_opp_team)!="",trimws(input$v628_opp_player_name)!="")
     tryCatch({
@@ -13761,11 +13761,15 @@ server <- function(input, output, session) {
     is_home <- identical(side,"Home")
     prefix <- if(is_home)"v628_home_slot_" else "v628_away_slot_"
     team_type <- if(is_home)v60_chr(input$v628_home_type,v628_home_team_type()) else v60_chr(input$v628_away_type,v628_away_team_type())
-    team_name <- if(is_home)v60_chr(input$v628_home_name,v628_home_team_name()) else v60_chr(input$v628_away_name,v628_away_team_name())
+    # V62.9: read the typed team name WITHOUT reacting to it, so typing a
+    # name doesn't rebuild this box (which kicked the cursor out).
+    team_name <- isolate(if(is_home)v60_chr(input$v628_home_name,v628_home_team_name()) else v60_chr(input$v628_away_name,v628_away_team_name()))
     current <- if(is_home)v628_home_lineup() else v628_away_lineup()
     choices <- v628_choices_for(team_type,team_name)
     tagList(lapply(seq_len(12L),function(i){
-      selected <- if(i<=length(current))as.character(current[[i]])else""
+      # Keep any hitter already picked in this slot if the box rebuilds.
+      picked <- isolate(input[[paste0(prefix,i)]])
+      selected <- if(!is.null(picked)) as.character(picked) else if(i<=length(current))as.character(current[[i]])else""
       div(
         style="display:grid;grid-template-columns:42px minmax(0,1fr);align-items:center;gap:8px;margin-bottom:6px;",
         div(style="height:38px;border-radius:8px;background:#f1f3f5;display:flex;align-items:center;justify-content:center;font-weight:900;color:#555;",i),
@@ -13773,6 +13777,26 @@ server <- function(input, output, session) {
       )
     }))
   }
+  # V62.9: opponent rosters are matched by team name. After the coach stops
+  # typing (about 1 second), refresh that side's hitter dropdowns in place,
+  # without rebuilding the box or clearing hitters already picked.
+  v629_refresh_side_slots <- function(side){
+    is_home <- identical(side,"Home")
+    team_type <- if(is_home)v60_chr(input$v628_home_type,"Our") else v60_chr(input$v628_away_type,"Our")
+    if(!identical(team_type,"Opponent")) return()
+    team_name <- if(is_home)v60_chr(input$v628_home_name,"") else v60_chr(input$v628_away_name,"")
+    prefix <- if(is_home)"v628_home_slot_" else "v628_away_slot_"
+    choices <- v628_choices_for("Opponent",team_name)
+    for(i in seq_len(12L)){
+      picked <- v60_chr(input[[paste0(prefix,i)]],"")
+      updateSelectizeInput(session,paste0(prefix,i),choices=c("— Empty —"="",choices),selected=picked)
+    }
+  }
+  v629_away_name_d <- debounce(reactive(input$v628_away_name),1000)
+  v629_home_name_d <- debounce(reactive(input$v628_home_name),1000)
+  observeEvent(v629_away_name_d(),{ isolate(v629_refresh_side_slots("Away")) },ignoreInit=TRUE)
+  observeEvent(v629_home_name_d(),{ isolate(v629_refresh_side_slots("Home")) },ignoreInit=TRUE)
+  
   v628_collect_lineup_slots <- function(side){
     prefix <- if(identical(side,"Home"))"v628_home_slot_" else "v628_away_slot_"
     vals <- vapply(seq_len(12L),function(i){
@@ -13789,14 +13813,14 @@ server <- function(input, output, session) {
                  div(class="admin-note","Build both batting orders before the game. Away bats in the TOP half; Home bats in the BOTTOM half."),
                  fluidRow(
                    column(6,
-                          selectInput("v628_away_type","Away Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=v628_away_team_type()),
-                          textInput("v628_away_name","Away Team Name",value=v628_away_team_name()),
+                          selectInput("v628_away_type","Away Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=isolate(v60_chr(input$v628_away_type,v628_away_team_type()))),
+                          textInput("v628_away_name","Away Team Name",value=isolate(v60_chr(input$v628_away_name,v628_away_team_name()))),
                           div(style="font-weight:900;font-size:16px;margin:8px 0 7px;","Away Batting Order"),
                           div(style="border:1px solid #d9dde3;border-radius:11px;padding:10px;background:#fff;",v628_lineup_card_builder("Away"))
                    ),
                    column(6,
-                          selectInput("v628_home_type","Home Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=v628_home_team_type()),
-                          textInput("v628_home_name","Home Team Name",value=v628_home_team_name()),
+                          selectInput("v628_home_type","Home Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=isolate(v60_chr(input$v628_home_type,v628_home_team_type()))),
+                          textInput("v628_home_name","Home Team Name",value=isolate(v60_chr(input$v628_home_name,v628_home_team_name()))),
                           div(style="font-weight:900;font-size:16px;margin:8px 0 7px;","Home Batting Order"),
                           div(style="border:1px solid #d9dde3;border-radius:11px;padding:10px;background:#fff;",v628_lineup_card_builder("Home"))
                    )
