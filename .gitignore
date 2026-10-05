@@ -14,3 +14,5 @@ R/.Rapp.history
 *service*account*.json
 *credentials*.json
 *key*.json
+# Local-only test sheet link (never upload)
+.test_sheet_url

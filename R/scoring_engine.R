@@ -366,9 +366,36 @@ score_pitch_decision <- function(
   ) {
     
     base_score <- -3
-    
+
   }
-  
+
+  # ------------------------------------------------
+  # 2K SHADOW TAKE CALLED A BALL (V62.9)
+  # ------------------------------------------------
+  # Laying off a 2-strike Shadow pitch that is called a ball
+  # is a good decision:
+  #   Ball (count continues)  = +1
+  #   Hit By Pitch            = +1
+  #   Ball four (Walk)        = +2
+  # Strike three looking stays -3 (rule above).
+
+  if (
+    identical(zone_group, "Shadow") &&
+    identical(count_state, "2K") &&
+    identical(swing_take, "Take") &&
+    identical(pitch_result, "Ball")
+  ) {
+
+    pa_now <- if (is.null(pa_result_on_pitch) || length(pa_result_on_pitch) == 0 || is.na(pa_result_on_pitch[1])) "" else as.character(pa_result_on_pitch[1])
+
+    if (identical(pa_now, "Walk")) {
+      base_score <- 2
+    } else {
+      base_score <- 1
+    }
+
+  }
+
   base_score
 }
 

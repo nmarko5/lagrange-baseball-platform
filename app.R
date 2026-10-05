@@ -18,6 +18,22 @@ library(readxl)
 
 SHEET_URL <- "https://docs.google.com/spreadsheets/d/1FBwANX0oBZO6bYX5iblICFsf-HWeDC7Hj_RmTvANBZw/edit?usp=sharing"
 
+# V62.9 — TEST SHEET SWITCH
+# If a file named .test_sheet_url sits in the project folder on YOUR Mac,
+# the app uses that Google Sheet instead of the real one. That file is
+# never uploaded to GitHub, and this switch is ignored on Connect Cloud,
+# so the live app always uses the real sheet.
+V629_USING_TEST_SHEET <- FALSE
+if (file.exists(".test_sheet_url") &&
+    !nzchar(Sys.getenv("GS4_SERVICE_ACCOUNT_JSON", unset = ""))) {
+  v629_test_url <- trimws(readLines(".test_sheet_url", warn = FALSE)[1])
+  if (!is.na(v629_test_url) && grepl("^https://docs\\.google\\.com/spreadsheets/", v629_test_url)) {
+    SHEET_URL <- v629_test_url
+    V629_USING_TEST_SHEET <- TRUE
+    message("*** Using the TEST sheet: ", SHEET_URL)
+  }
+}
+
 gs4_service_account_json <- Sys.getenv("GS4_SERVICE_ACCOUNT_JSON", unset = "")
 
 if (nzchar(gs4_service_account_json)) {
@@ -42,6 +58,60 @@ if (nzchar(gs4_service_account_json)) {
 source("R/strike_zone.R")
 source("R/google_sheets.R", local = TRUE)
 source("R/scoring_engine.R")
+
+# ==================================================
+# V62.9 — SHORT-TERM READ MEMORY (fewer Google Sheets calls)
+# ==================================================
+# Sign-in and report loading used to read the same tabs several times in a
+# row (Players 4x, Pitches 4x...), which made loading slow and triggered
+# Google's "429 too many requests" pauses. Now, if the exact same read
+# happened in the last 20 seconds, the saved copy is reused.
+# ANY save from the app (append / write / clear / delete) wipes the memory,
+# so nobody ever sees data that is older than their own last save.
+v629_read_cache <- new.env(parent = emptyenv())
+v629_cache_ttl_seconds <- 20
+v629_cache_clear <- function() {
+  rm(list = ls(v629_read_cache, all.names = TRUE), envir = v629_read_cache)
+  invisible(TRUE)
+}
+v629_range_read <- function(...) {
+  key <- paste(deparse(list(...)), collapse = "")
+  now <- as.numeric(Sys.time())
+  hit <- v629_read_cache[[key]]
+  if (!is.null(hit) && (now - hit$t) < v629_cache_ttl_seconds) return(hit$v)
+  v <- googlesheets4::range_read(...)
+  assign(key, list(t = now, v = v), envir = v629_read_cache)
+  v
+}
+v629_writer <- function(fn) {
+  force(fn)
+  function(...) {
+    on.exit(v629_cache_clear(), add = TRUE)
+    fn(...)
+  }
+}
+v629_sheet_append <- v629_writer(googlesheets4::sheet_append)
+v629_range_write  <- v629_writer(googlesheets4::range_write)
+v629_range_clear  <- v629_writer(googlesheets4::range_clear)
+v629_range_delete <- v629_writer(googlesheets4::range_delete)
+v629_sheet_add    <- v629_writer(googlesheets4::sheet_add)
+# The read helpers in R/google_sheets.R get the same short-term memory.
+v629_remember <- function(fn, label) {
+  force(fn)
+  function(...) {
+    key <- paste0(label, "|", paste(deparse(list(...)), collapse = ""))
+    now <- as.numeric(Sys.time())
+    hit <- v629_read_cache[[key]]
+    if (!is.null(hit) && (now - hit$t) < v629_cache_ttl_seconds) return(hit$v)
+    v <- fn(...)
+    assign(key, list(t = now, v = v), envir = v629_read_cache)
+    v
+  }
+}
+gs_read_players        <- v629_remember(gs_read_players, "players")
+gs_read_pitches        <- v629_remember(gs_read_pitches, "pitches")
+gs_read_pitch_counters <- v629_remember(gs_read_pitch_counters, "pitch_counters")
+gs_read_pa_counters    <- v629_remember(gs_read_pa_counters, "pa_counters")
 
 # ==================================================
 # UI
@@ -82,6 +152,11 @@ ui <- fluidPage(
     )
   ),
   uiOutput("v6271_login_overlay"),
+  if (isTRUE(V629_USING_TEST_SHEET)) tags$div(
+    style=paste0("position:fixed;right:14px;bottom:14px;z-index:1000002;background:#F59E0B;color:#111;",
+                 "font-weight:900;padding:8px 14px;border-radius:999px;box-shadow:0 2px 8px rgba(0,0,0,.25);"),
+    "TEST SHEET — not your real data"
+  ) else NULL,
   
   tags$head(
     tags$script(HTML("
@@ -1693,10 +1768,83 @@ ui <- fluidPage(
           min-width: 270px;
         }
       }
+
+      /* ==================================================
+         V62.9 — REPORT POLISH (less cluttered)
+         ================================================== */
+      /* Heat maps wrap onto a second row instead of hiding off-screen
+         behind a sideways scroll. Each panel keeps its locked 270px stage,
+         so the batter / zone spacing is unchanged. */
+      .heatmap-row { flex-wrap: wrap; overflow-x: visible; gap: 14px; justify-content: center; }
+      .heatmap-panel { flex: 0 0 270px; padding: 12px 8px 10px 8px; border-radius: 10px; }
+      .heatmap-panel .heatmap-title { font-size: 15px; }
+      .report-breakdown-grid { gap: 16px; margin-top: 16px; margin-bottom: 18px; }
+      .report-breakdown-card { padding: 14px 16px 12px 16px; border-radius: 10px; }
+      .player-report-shell > div, .pitcher-report-shell > div { margin-bottom: 14px; }
+      .compact-metric-strip, .compact-count-strip { margin-bottom: 12px; }
+      details.v629-explainer { cursor: pointer; }
+      details.v629-explainer > summary { list-style: none; outline: none; }
+      details.v629-explainer > summary::-webkit-details-marker { display: none; }
+      details.v629-explainer > summary::after { content: '  +'; font-weight: 900; color: #A7191F; }
+      details.v629-explainer[open] > summary::after { content: '  \\2212'; }
+      details.v629-explainer[open] > summary { margin-bottom: 6px; }
+      .v629-print-hint { font-size: 12px; color: #667085; margin-top: 6px; }
+      .v629-lb-print-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin-top: 10px; }
+      .v629-lb-print-controls .form-group { min-width: 320px; flex: 1 1 320px; margin-bottom: 0; }
+      #v629_lb_print_wrap { display: none; }
+
+      /* Printable leaderboard sheet */
+      .v629-lbp-head { border-bottom: 3px solid #A7191F; padding-bottom: 6px; margin-bottom: 14px; }
+      .v629-lbp-title { font-size: 22px; font-weight: 900; }
+      .v629-lbp-meta { font-size: 12px; color: #555; }
+      .v629-lbp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+      .v629-lbp-card { border: 1px solid #d9d9d9; border-radius: 8px; padding: 8px 10px; break-inside: avoid; page-break-inside: avoid; }
+      .v629-lbp-card h4 { margin: 0 0 6px 0; font-size: 14px; font-weight: 900; color: #A7191F; text-transform: uppercase; }
+      .v629-lbp-card table { width: 100%; border-collapse: collapse; font-size: 12px; }
+      .v629-lbp-card th { text-align: left; border-bottom: 1px solid #bbb; padding: 3px 4px; }
+      .v629-lbp-card td { padding: 3px 4px; border-bottom: 1px solid #eee; }
+      .v629-lbp-card td.v { text-align: right; font-weight: 800; }
+      .v629-lbp-card th.v { text-align: right; }
+
+      /* ==================================================
+         V62.9 — PRINT / SAVE AS PDF
+         ================================================== */
+      @media print {
+        @page { size: letter; margin: 0.35in; }
+        html, body { background: #ffffff !important; }
+        * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        .app-sidebar, .tabbable > .nav-tabs, .container-fluid > h2,
+        #v6272_boot_cover, #v6275_transition_cover, #shiny-notification-panel,
+        .report-filters-card, .pitcher-filter-card, .leaderboard-filter-grid, .v629-lb-print-controls,
+        details.v629-explainer, .v629-print-hint, button, .btn { display: none !important; }
+        .tabbable > .tab-content { margin-left: 0 !important; padding-left: 0 !important; }
+        .tab-content > .tab-pane:not(.active) { display: none !important; }
+        .report-topbar, .pitcher-topbar { display: block !important; }
+        .heatmap-row { flex-wrap: wrap !important; overflow: visible !important; justify-content: center !important; }
+        .heatmap-panel, .report-breakdown-card, .grade-block, .compact-metric-strip, .compact-count-strip,
+        .leaderboard-table-card, .leaderboard-podium-card { break-inside: avoid; page-break-inside: avoid; }
+        a { color: inherit !important; text-decoration: none !important; }
+        body.v629-print-lb .leaderboard-shell > *:not(#v629_lb_print_wrap) { display: none !important; }
+        body.v629-print-lb #v629_lb_print_wrap { display: block !important; }
+      }
 "))
   ),
   
   tags$script(HTML("
+    // V62.9: print the current page (Save as PDF from the print window).
+    function v629PrintNow(mode) {
+      var cls = 'v629-print-' + (mode || 'page');
+      document.body.classList.add(cls);
+      var done = function() { document.body.classList.remove(cls); window.removeEventListener('afterprint', done); };
+      window.addEventListener('afterprint', done);
+      setTimeout(function() { window.print(); }, 250);
+    }
+    $(document).on('shiny:connected', function() {
+      Shiny.addCustomMessageHandler('v629Print', function(x) {
+        var mode = (x && x.mode) ? x.mode : 'page';
+        setTimeout(function() { v629PrintNow(mode); }, (x && x.delay) ? x.delay : 400);
+      });
+    });
     function switchMainTab(tabName, el) {
       $('.nav-tabs a[data-value=\"' + tabName + '\"]').tab('show');
       $('.app-nav-item').removeClass('active');
@@ -2191,6 +2339,8 @@ ui <- fluidPage(
         )
       ),
       
+      uiOutput("v629_undo_ui"),
+      
       h4("Last Pitch Result:"),
       
       h3(
@@ -2652,9 +2802,9 @@ ui <- fluidPage(
           "View shown from catcher's perspective."
         ),
         
-        div(
-          class = "decision-quality-explainer",
-          tags$strong("WHAT IS DECISION QUALITY? "),
+        tags$details(
+          class = "decision-quality-explainer v629-explainer",
+          tags$summary(tags$strong("WHAT IS DECISION QUALITY?")),
           "Decision Quality reflects how good each swing/take decision was based on pitch location and count context. ",
           "It combines the value of taking vs. swinging at Heart, Shadow, Chase and Waste pitches, then adjusts for execution outcomes such as contact quality and strikeouts. ",
           "Higher values indicate better decisions."
@@ -2719,11 +2869,13 @@ ui <- fluidPage(
         
         div(
           style = "text-align:center;margin:10px 0 18px 0;",
-          downloadButton(
-            "export_player_report_pdf",
-            "EXPORT REPORT (PDF)",
-            class = "btn btn-danger"
-          )
+          tags$button(
+            type = "button",
+            class = "btn btn-danger",
+            onclick = "v629PrintNow('report')",
+            "PRINT / SAVE AS PDF"
+          ),
+          div(class = "v629-print-hint", "In the print window, choose \u201cSave as PDF\u201d as the destination.")
         )
       )
     ),
@@ -2742,11 +2894,16 @@ ui <- fluidPage(
             dateRangeInput("leaderboard_date_range","Date Range",start=Sys.Date()-365,end=Sys.Date()),
             actionButton("leaderboard_refresh","REFRESH")
           ),
+          div(class="v629-lb-print-controls",
+              selectizeInput("v629_lb_print_metrics","Leaderboards to print",choices=NULL,multiple=TRUE,
+                             options=list(placeholder="Current leaderboard only",plugins=list("remove_button"))),
+              actionButton("v629_lb_print_btn","PRINT / SAVE AS PDF",class="btn btn-danger")),
           div(class="leaderboard-note","Hitters and Pitchers — Game use live/game data. Bullpen is separate and ranks bullpen-only command performance. Green = better than the team/staff average • Yellow = near average • Red = below average. Click a player name to jump to the full report.")
         ),
         uiOutput("leaderboard_quab_definition"),
         div(class="leaderboard-podium-card",div(class="leaderboard-podium-title","Top 3"),uiOutput("leaderboard_podium")),
-        div(class="leaderboard-table-card",div(class="leaderboard-section-title",textOutput("leaderboard_table_title",inline=TRUE)),uiOutput("leaderboard_table"))
+        div(class="leaderboard-table-card",div(class="leaderboard-section-title",textOutput("leaderboard_table_title",inline=TRUE)),uiOutput("leaderboard_table")),
+        div(id="v629_lb_print_wrap",uiOutput("v629_lb_print_area"))
       )
     ),
     
@@ -2778,10 +2935,10 @@ ui <- fluidPage(
           )
         ),
         div(class="pitcher-grade-grid",uiOutput("pitcher_report_grades")),
-        div(
-          class = "decision-quality-explainer",
+        tags$details(
+          class = "decision-quality-explainer v629-explainer",
           style = "margin-top:0;margin-bottom:7px;",
-          tags$strong("HOW ARE THE PITCHER GRADES CALCULATED? "),
+          tags$summary(tags$strong("HOW ARE THE PITCHER GRADES CALCULATED?")),
           tags$strong("Overall Grade: "),
           "Composite of Command, Miss and Efficiency.  ",
           tags$strong("Command Grade: "),
@@ -2946,7 +3103,7 @@ ui <- fluidPage(
           div(class="pitcher-section-note",uiOutput("pitcher_bullpen_explainer"))
         ),
         
-        div(style="text-align:center;margin:10px 0 18px 0;",downloadButton("export_pitcher_report_pdf","EXPORT PITCHER REPORT (PDF)",class="btn btn-danger"))
+        div(style="text-align:center;margin:10px 0 18px 0;",tags$button(type="button",class="btn btn-danger",onclick="v629PrintNow('report')","PRINT / SAVE AS PDF"),div(class="v629-print-hint","In the print window, choose \u201cSave as PDF\u201d as the destination."))
       )
     ),
     
@@ -3222,6 +3379,7 @@ ui <- fluidPage(
                       "Roster memberships are season-specific. Removing a player from a future season does not delete ",
                       "the player's identity or historical data from earlier seasons.")
               ),
+              uiOutput("v629_rescore_card"),
               div(id="platform_onboarding_card",class="admin-card",
                   div(class="admin-title","Organization Onboarding"),
                   div(class="admin-note",
@@ -3651,6 +3809,12 @@ server <- function(input, output, session) {
   v628_home_team_type <- reactiveVal("Our")
   v628_away_team_name <- reactiveVal("LaGrange")
   v628_home_team_name <- reactiveVal("LaGrange")
+  # V62.9: starting pitchers saved with the lineups, and the undo history.
+  v629_away_sp <- reactiveVal("")
+  v629_home_sp <- reactiveVal("")
+  v629_undo_stack <- reactiveVal(list())
+  v629_restoring_half <- FALSE
+  v629_restoring_pitcher <- FALSE
   
   report_pitches <- reactiveVal(data.frame())
   report_plate_appearances <- reactiveVal(data.frame())
@@ -3764,7 +3928,7 @@ server <- function(input, output, session) {
     out
   }
   append_row_atomic <- function(sheet_name,values){
-    googlesheets4::sheet_append(ss=SHEET_URL,data=one_row_df(values),sheet=sheet_name)
+    v629_sheet_append(ss=SHEET_URL,data=one_row_df(values),sheet=sheet_name)
     invisible(TRUE)
   }
   
@@ -3779,10 +3943,10 @@ server <- function(input, output, session) {
     )
     for(nm in names(specs)){
       if(!nm %in% existing){
-        googlesheets4::sheet_add(SHEET_URL,nm)
+        v629_sheet_add(SHEET_URL,nm)
         cols<-specs[[nm]]
         header<-as.data.frame(as.list(setNames(cols,cols)),stringsAsFactors=FALSE,check.names=FALSE)
-        googlesheets4::range_write(ss=SHEET_URL,data=header,sheet=nm,range=paste0("A1:",LETTERS[length(cols)],"1"),col_names=FALSE)
+        v629_range_write(ss=SHEET_URL,data=header,sheet=nm,range=paste0("A1:",LETTERS[length(cols)],"1"),col_names=FALSE)
       }
     }
     invisible(TRUE)
@@ -3790,7 +3954,7 @@ server <- function(input, output, session) {
   v628_read_sheet <- function(sheet_name, range=NULL){
     tryCatch({
       v628_ensure_game_architecture()
-      as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet=sheet_name,range=range,col_names=TRUE),stringsAsFactors=FALSE)
+      as.data.frame(v629_range_read(ss=SHEET_URL,sheet=sheet_name,range=range,col_names=TRUE),stringsAsFactors=FALSE)
     },error=function(e)data.frame(stringsAsFactors=FALSE))
   }
   v60_chr <- function(x,default=""){
@@ -3817,8 +3981,8 @@ server <- function(input, output, session) {
   ensure_organizations_sheet <- function(){
     existing<-googlesheets4::sheet_names(SHEET_URL)
     if(!"Organizations"%in%existing){
-      googlesheets4::sheet_add(SHEET_URL,"Organizations")
-      googlesheets4::range_write(
+      v629_sheet_add(SHEET_URL,"Organizations")
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(
           Organization_ID="Organization_ID",
@@ -3843,7 +4007,7 @@ server <- function(input, output, session) {
   load_organizations <- function(){
     tryCatch({
       d<-as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet="Organizations",
           range="A1:I101",
@@ -4003,7 +4167,7 @@ server <- function(input, output, session) {
   v60_read_or_empty <- function(sheet_name,range,headers){
     tryCatch({
       d<-as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,sheet=sheet_name,range=range,col_names=TRUE
         ),
         stringsAsFactors=FALSE
@@ -4021,12 +4185,12 @@ server <- function(input, output, session) {
   v60_rewrite_sheet <- function(sheet_name,range_clear_to,headers,data){
     for(nm in setdiff(headers,names(data)))data[[nm]]<-""
     data<-data[,headers,drop=FALSE]
-    googlesheets4::range_clear(
+    v629_range_clear(
       ss=SHEET_URL,
       range=paste0("'",sheet_name,"'!A2:",range_clear_to)
     )
     if(nrow(data)>0){
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=data,
         sheet=sheet_name,
@@ -4281,14 +4445,14 @@ server <- function(input, output, session) {
       
       for(sheet_name in names(specs)){
         if(!sheet_name %in% existing){
-          googlesheets4::sheet_add(SHEET_URL,sheet_name)
+          v629_sheet_add(SHEET_URL,sheet_name)
           cols <- specs[[sheet_name]]
           header <- as.data.frame(
             as.list(setNames(cols,cols)),
             stringsAsFactors=FALSE,
             check.names=FALSE
           )
-          googlesheets4::range_write(
+          v629_range_write(
             ss=SHEET_URL,
             data=header,
             sheet=sheet_name,
@@ -4299,7 +4463,7 @@ server <- function(input, output, session) {
       }
       
       # Sessions M:N only needs to be ensured during one-time worker maintenance.
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(
           Season_ID="Season_ID",
@@ -4321,7 +4485,7 @@ server <- function(input, output, session) {
   compact_architecture_sheet <- function(sheet_name,range_cols,key_col,max_rows=5000){
     tryCatch({
       raw<-as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet=sheet_name,
           range=paste0("A1:",range_cols,max_rows),
@@ -4344,12 +4508,12 @@ server <- function(input, output, session) {
       }
       
       if(meaningful_gap){
-        googlesheets4::range_clear(
+        v629_range_clear(
           ss=SHEET_URL,
           range=paste0("'",sheet_name,"'!A2:",range_cols,max_rows)
         )
         if(nrow(real)>0){
-          googlesheets4::range_write(
+          v629_range_write(
             ss=SHEET_URL,
             data=real,
             sheet=sheet_name,
@@ -4371,7 +4535,7 @@ server <- function(input, output, session) {
       org <- setting_chr("Organization_ID","LAGRANGE")
       
       s <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,sheet="Seasons",range="A1:F101",col_names=TRUE
         ),
         stringsAsFactors=FALSE
@@ -4380,7 +4544,7 @@ server <- function(input, output, session) {
       existing_seasons <- if("Season_ID"%in%names(s)) trimws(as.character(s$Season_ID)) else character(0)
       
       if(!"LAGRANGE_2026_27" %in% existing_seasons){
-        googlesheets4::sheet_append(
+        v629_sheet_append(
           ss=SHEET_URL,
           data=data.frame(
             Season_ID="LAGRANGE_2026_27",
@@ -4396,7 +4560,7 @@ server <- function(input, output, session) {
       }
       
       p <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,sheet="Periods",range="A1:I101",col_names=TRUE
         ),
         stringsAsFactors=FALSE
@@ -4419,7 +4583,7 @@ server <- function(input, output, session) {
       
       for(i in seq_len(nrow(period_seed))){
         if(!period_seed$Period_ID[i] %in% existing_periods){
-          googlesheets4::sheet_append(
+          v629_sheet_append(
             ss=SHEET_URL,
             data=period_seed[i,,drop=FALSE],
             sheet="Periods"
@@ -4428,7 +4592,7 @@ server <- function(input, output, session) {
       }
       
       sub <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,sheet="Subscriptions",range="A1:G101",col_names=TRUE
         ),
         stringsAsFactors=FALSE
@@ -4437,7 +4601,7 @@ server <- function(input, output, session) {
       existing_subs <- if("Subscription_ID"%in%names(sub)) trimws(as.character(sub$Subscription_ID)) else character(0)
       
       if(!"LAGRANGE_SUB_2026_27" %in% existing_subs){
-        googlesheets4::sheet_append(
+        v629_sheet_append(
           ss=SHEET_URL,
           data=data.frame(
             Subscription_ID="LAGRANGE_SUB_2026_27",
@@ -4462,7 +4626,7 @@ server <- function(input, output, session) {
   
   repair_roster_memberships_header <- function(){
     tryCatch({
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(
           Roster_Membership_ID="Roster_Membership_ID",
@@ -4548,7 +4712,7 @@ server <- function(input, output, session) {
           stringsAsFactors=FALSE
         )
         
-        googlesheets4::sheet_append(
+        v629_sheet_append(
           ss=SHEET_URL,
           data=rows,
           sheet="Roster_Memberships"
@@ -4567,7 +4731,7 @@ server <- function(input, output, session) {
       org <- current_org_id()
       
       s <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F101",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F101",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(s)>0 && "Organization_ID"%in%names(s)){
@@ -4576,7 +4740,7 @@ server <- function(input, output, session) {
       seasons_directory(s)
       
       p <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I101",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Periods",range="A1:I101",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(p)>0 && "Organization_ID"%in%names(p)){
@@ -4585,7 +4749,7 @@ server <- function(input, output, session) {
       periods_directory(p)
       
       sub <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G101",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G101",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(sub)>0 && "Organization_ID"%in%names(sub)){
@@ -4594,7 +4758,7 @@ server <- function(input, output, session) {
       subscriptions_directory(sub)
       
       rm <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H1001",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H1001",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(rm)>0 && "Organization_ID"%in%names(rm)){
@@ -4687,7 +4851,7 @@ server <- function(input, output, session) {
   backfill_session_season_period <- function(){
     tryCatch({
       d<-as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),
         stringsAsFactors=FALSE
       )
       if(nrow(d)==0||!"Session_ID"%in%names(d))return(TRUE)
@@ -4729,7 +4893,7 @@ server <- function(input, output, session) {
       
       if(changed){
         # Rewrite only the compact Sessions table, preserving its existing rows/order.
-        googlesheets4::range_clear(ss=SHEET_URL,range="'Sessions'!A2:N1001")
+        v629_range_clear(ss=SHEET_URL,range="'Sessions'!A2:N1001")
         real<-d[!is.na(d$Session_ID)&trimws(as.character(d$Session_ID))!="",,drop=FALSE]
         if(nrow(real)>0){
           # Keep exactly A:N
@@ -4738,7 +4902,7 @@ server <- function(input, output, session) {
             "Session_Type","Start_Time","End_Time","Created_By","Notes","Status","Season_ID","Period_ID"
           )
           for(nm in setdiff(wanted,names(real)))real[[nm]]<-""
-          googlesheets4::range_write(
+          v629_range_write(
             ss=SHEET_URL,
             data=real[,wanted,drop=FALSE],
             sheet="Sessions",
@@ -4832,8 +4996,8 @@ server <- function(input, output, session) {
   ensure_users_sheet <- function(){
     tryCatch({
       sheets <- googlesheets4::sheet_names(SHEET_URL)
-      if(!"Users" %in% sheets) googlesheets4::sheet_add(SHEET_URL,"Users")
-      googlesheets4::range_write(
+      if(!"Users" %in% sheets) v629_sheet_add(SHEET_URL,"Users")
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(
           User_ID="User_ID",Organization_ID="Organization_ID",
@@ -4843,12 +5007,12 @@ server <- function(input, output, session) {
         sheet="Users",range="A1:F1",col_names=FALSE
       )
       d<-as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Users",range="A1:F1001",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Users",range="A1:F1001",col_names=TRUE),
         stringsAsFactors=FALSE
       )
       has_users<-nrow(d)>0&&"User_ID"%in%names(d)&&any(!is.na(d$User_ID)&trimws(as.character(d$User_ID))!="")
       if(!has_users){
-        googlesheets4::sheet_append(
+        v629_sheet_append(
           ss=SHEET_URL,
           data=data.frame(
             User_ID="LAGRANGE_USER_NATE_MARKO",
@@ -4866,7 +5030,7 @@ server <- function(input, output, session) {
   load_user_directory <- function(){
     tryCatch({
       d<-as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet="Users",
           range="A1:F1001",
@@ -5215,7 +5379,7 @@ server <- function(input, output, session) {
   
   ensure_multi_user_pitch_columns <- function(){
     tryCatch({
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(Charted_By="Charted_By",Client_ID="Client_ID",User_ID="User_ID",stringsAsFactors=FALSE),
         sheet="Pitches",range="AM1:AO1",col_names=FALSE
@@ -5227,7 +5391,7 @@ server <- function(input, output, session) {
     tryCatch({
       # Read as character so blank/preallocated cells cannot become list columns.
       raw<-suppressMessages(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet="Pitches",
           range="A2:AN10000",
@@ -5264,13 +5428,13 @@ server <- function(input, output, session) {
       
       # Clear the old data area, including empty-string/formula rows that caused
       # sheet_append() to think the table extended to row 5001.
-      googlesheets4::range_clear(
+      v629_range_clear(
         ss=SHEET_URL,
         range="'Pitches'!A2:AN10000"
       )
       
       # Put every real pitch back contiguously starting at row 2.
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=compact,
         sheet="Pitches",
@@ -5303,7 +5467,7 @@ server <- function(input, output, session) {
   compact_plate_appearances_sheet_if_needed <- function(){
     tryCatch({
       raw<-suppressMessages(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet="Plate_Appearances",
           range="A2:Z10000",
@@ -5337,12 +5501,12 @@ server <- function(input, output, session) {
       compact <- raw[keep,,drop=FALSE]
       rownames(compact)<-NULL
       
-      googlesheets4::range_clear(
+      v629_range_clear(
         ss=SHEET_URL,
         range="'Plate_Appearances'!A2:Z10000"
       )
       
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=compact,
         sheet="Plate_Appearances",
@@ -5379,7 +5543,7 @@ server <- function(input, output, session) {
       # error on some workbook metadata.
       settings_exists <- tryCatch({
         suppressMessages(
-          googlesheets4::range_read(
+          v629_range_read(
             ss=SHEET_URL,
             sheet="Settings",
             range="A1:B2",
@@ -5407,7 +5571,7 @@ server <- function(input, output, session) {
           stringsAsFactors=FALSE
         )
         
-        googlesheets4::sheet_add(
+        v629_sheet_add(
           ss=SHEET_URL,
           sheet="Settings",
           gridProperties=list(
@@ -5417,7 +5581,7 @@ server <- function(input, output, session) {
           )
         )
         
-        googlesheets4::range_write(
+        v629_range_write(
           ss=SHEET_URL,
           data=dat,
           sheet="Settings",
@@ -5440,7 +5604,7 @@ server <- function(input, output, session) {
   load_app_settings <- function(update_ui=TRUE){
     if(!ensure_settings_sheet())return(invisible(FALSE))
     tryCatch({
-      d<-googlesheets4::range_read(ss=SHEET_URL,sheet="Settings",range="A1:B100",col_names=TRUE)
+      d<-v629_range_read(ss=SHEET_URL,sheet="Settings",range="A1:B100",col_names=TRUE)
       d<-as.data.frame(d,stringsAsFactors=FALSE)
       vals<-app_settings()
       if(nrow(d)>0&&all(c("Key","Value")%in%names(d))){
@@ -5487,7 +5651,7 @@ server <- function(input, output, session) {
     if(vals$Organization_Name=="")vals$Organization_Name<-"LaGrange College"
     ensure_settings_sheet()
     dat<-data.frame(Key=names(vals),Value=vapply(vals,as.character,character(1)),stringsAsFactors=FALSE)
-    googlesheets4::range_write(ss=SHEET_URL,data=dat,sheet="Settings",range="A1",col_names=TRUE)
+    v629_range_write(ss=SHEET_URL,data=dat,sheet="Settings",range="A1",col_names=TRUE)
     app_settings(vals)
     settings_message("Settings saved successfully.")
     load_app_settings(update_ui=TRUE)
@@ -5804,7 +5968,7 @@ server <- function(input, output, session) {
       org<-current_org_id()
       
       all_rm<-as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet="Roster_Memberships",
           range="A1:H5001",
@@ -5884,13 +6048,13 @@ server <- function(input, output, session) {
         drop=FALSE
       ]
       
-      googlesheets4::range_clear(
+      v629_range_clear(
         ss=SHEET_URL,
         range="'Roster_Memberships'!A2:H5001"
       )
       
       if(nrow(real)>0){
-        googlesheets4::range_write(
+        v629_range_write(
           ss=SHEET_URL,
           data=real,
           sheet="Roster_Memberships",
@@ -6261,17 +6425,17 @@ server <- function(input, output, session) {
   
   refresh_sessions_admin_data <- function(){
     tryCatch({
-      s<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),stringsAsFactors=FALSE), "sessions")
+      s<-v49_normalize_sheet_data(as.data.frame(v629_range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),stringsAsFactors=FALSE), "sessions")
       if(nrow(s)>0&&"Session_ID"%in%names(s))s<-s[!is.na(s$Session_ID)&trimws(as.character(s$Session_ID))!="",,drop=FALSE]
       if(nrow(s)>0&&"Organization_ID"%in%names(s))s<-s[trimws(as.character(s$Organization_ID))==current_org_id(),,drop=FALSE]
       sessions_admin_sessions(s)
       
-      p<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Pitches",range="A1:AO10001",col_names=TRUE),stringsAsFactors=FALSE), "pitches")
+      p<-v49_normalize_sheet_data(as.data.frame(v629_range_read(ss=SHEET_URL,sheet="Pitches",range="A1:AO10001",col_names=TRUE),stringsAsFactors=FALSE), "pitches")
       if(nrow(p)>0&&"Session_ID"%in%names(p))p<-p[!is.na(p$Session_ID)&trimws(as.character(p$Session_ID))!="",,drop=FALSE]
       if(nrow(p)>0&&"Organization_ID"%in%names(p))p<-p[trimws(as.character(p$Organization_ID))==current_org_id(),,drop=FALSE]
       sessions_admin_pitches(p)
       
-      pa<-v49_normalize_sheet_data(as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Plate_Appearances",range="A1:Z10001",col_names=TRUE),stringsAsFactors=FALSE), "pa")
+      pa<-v49_normalize_sheet_data(as.data.frame(v629_range_read(ss=SHEET_URL,sheet="Plate_Appearances",range="A1:Z10001",col_names=TRUE),stringsAsFactors=FALSE), "pa")
       if(nrow(pa)>0&&"Session_ID"%in%names(pa))pa<-pa[!is.na(pa$Session_ID)&trimws(as.character(pa$Session_ID))!="",,drop=FALSE]
       if(nrow(pa)>0&&"Organization_ID"%in%names(pa))pa<-pa[trimws(as.character(pa$Organization_ID))==current_org_id(),,drop=FALSE]
       sessions_admin_pas(pa)
@@ -6315,11 +6479,11 @@ server <- function(input, output, session) {
   
   update_session_status <- function(session_id,new_status){
     if(is.null(session_id)||session_id=="")stop("Select a session first.")
-    d<-as.data.frame(googlesheets4::range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),stringsAsFactors=FALSE)
+    d<-as.data.frame(v629_range_read(ss=SHEET_URL,sheet="Sessions",range="A1:N1001",col_names=TRUE),stringsAsFactors=FALSE)
     idx<-which(as.character(d$Session_ID)==as.character(session_id))
     if(length(idx)==0)stop("Session ID was not found.")
     i<-idx[1]; row<-i+1
-    googlesheets4::range_write(
+    v629_range_write(
       ss=SHEET_URL,
       data=data.frame(
         End_Time=if(new_status=="Completed")format(Sys.time(),"%H:%M:%S")else"",
@@ -7446,7 +7610,7 @@ server <- function(input, output, session) {
   
   ensure_inning_column <- function() {
     tryCatch({
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(Inning="Inning",Half_Inning="Half_Inning",Outs_Before="Outs_Before",stringsAsFactors=FALSE),
         sheet="Pitches",
@@ -7458,7 +7622,7 @@ server <- function(input, output, session) {
   
   ensure_bullpen_columns <- function() {
     tryCatch({
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(
           Charting_Mode="Charting_Mode",
@@ -7763,7 +7927,7 @@ server <- function(input, output, session) {
   # ==================================================
   # QUAB STORAGE + LEADERBOARD
   # ==================================================
-  ensure_quab_pa_columns <- function(){tryCatch({googlesheets4::range_write(ss=SHEET_URL,data=data.frame(Is_Barrel="Is_Barrel",Is_Offensive_Play="Is_Offensive_Play",Move_Runner_3rd_LT2="Move_Runner_3rd_LT2",Is_QUAB="Is_QUAB",QUAB_Reasons="QUAB_Reasons",stringsAsFactors=FALSE),sheet="Plate_Appearances",range="V1:Z1",col_names=FALSE)},error=function(e){})}
+  ensure_quab_pa_columns <- function(){tryCatch({v629_range_write(ss=SHEET_URL,data=data.frame(Is_Barrel="Is_Barrel",Is_Offensive_Play="Is_Offensive_Play",Move_Runner_3rd_LT2="Move_Runner_3rd_LT2",Is_QUAB="Is_QUAB",QUAB_Reasons="QUAB_Reasons",stringsAsFactors=FALSE),sheet="Plate_Appearances",range="V1:Z1",col_names=FALSE)},error=function(e){})}
   observeEvent(TRUE,{ensure_quab_pa_columns()},once=TRUE)
   
   lb_safe_num<-function(x,default=NA_real_){x<-suppressWarnings(as.numeric(x));if(length(x)==0||!is.finite(x[1]))default else x[1]}
@@ -8016,6 +8180,67 @@ server <- function(input, output, session) {
   
   output$leaderboard_podium<-renderUI({df<-lb_sorted();if(nrow(df)==0)return(div(class="report-breakdown-note","No rankings available."));m<-input$leaderboard_rank_metric;if(is.null(m)||!m%in%names(df))m<-"Overall_Grade";top<-head(df,3);cards<-lapply(seq_len(nrow(top)),function(i){r<-top[i,,drop=FALSE];div(class="leaderboard-podium-place",div(class="leaderboard-podium-rank",paste0("#",i)),div(class="leaderboard-podium-name",lb_link(r$Player_ID,r$Player,input$leaderboard_type)),div(class="leaderboard-podium-value",lb_display(m,r[[m]][1])))});div(class="leaderboard-podium-grid",cards)})
   observeEvent(input$leaderboard_open_player,{x<-as.character(input$leaderboard_open_player);parts<-strsplit(x,"\\|")[[1]];if(length(parts)<2)return();tp<-parts[1];id<-paste(parts[-1],collapse="|");if(tp%in%c("Pitcher","Bullpen")){updateSelectInput(session,"pitcher_report_pitcher",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Pitcher Report",sidebar="PITCHER REPORTS"))}else{updateSelectInput(session,"report_batter",selected=id);session$sendCustomMessage("leaderboardNavigate",list(tab="Hitter Report",sidebar="HITTER'S REPORTS"))}})
+  # ==================================================
+  # V62.9 — PRINTABLE LEADERBOARDS
+  # ==================================================
+  v629_lb_choices <- function(){
+    if(identical(input$leaderboard_type,"Pitcher")) lb_pitcher_metric_choices
+    else if(identical(input$leaderboard_type,"Bullpen")) lb_bullpen_metric_choices
+    else lb_hitter_metric_choices
+  }
+  observeEvent(input$leaderboard_type,{
+    updateSelectizeInput(session,"v629_lb_print_metrics",choices=v629_lb_choices(),selected=character(0))
+  },ignoreInit=FALSE)
+  v629_lb_print_metrics_rv <- reactiveVal(character(0))
+  observeEvent(input$v629_lb_print_btn,{
+    ms <- input$v629_lb_print_metrics
+    if(is.null(ms) || length(ms)==0) ms <- input$leaderboard_rank_metric
+    v629_lb_print_metrics_rv(as.character(ms))
+    session$sendCustomMessage("v629Print", list(mode="lb", delay=1200))
+  })
+  output$v629_lb_print_area <- renderUI({
+    ms <- v629_lb_print_metrics_rv()
+    if(length(ms)==0) return(NULL)
+    df <- lb_rows()
+    ch <- v629_lb_choices()
+    type_label <- switch(as.character(input$leaderboard_type), Pitcher="Pitchers — Game", Bullpen="Bullpen", "Hitters")
+    sess <- input$leaderboard_session
+    sess_label <- if(is.null(sess) || identical(sess,"ALL")) "All sessions (cumulative)" else {
+      sl <- session_lookup()
+      r <- if(all(c("Session_ID","Session_Date","Session_Name") %in% names(sl))) sl[as.character(sl$Session_ID)==sess,,drop=FALSE] else data.frame()
+      if(nrow(r)>0) paste0(r$Session_Date[1], " — ", r$Session_Name[1]) else sess
+    }
+    dr <- input$leaderboard_date_range
+    dr_label <- if(length(dr)==2) paste0(format(as.Date(dr[1]),"%b %d, %Y"), " – ", format(as.Date(dr[2]),"%b %d, %Y")) else ""
+    cards <- lapply(ms, function(m){
+      lab <- names(ch)[match(m, unname(ch))]; if(length(lab)==0 || is.na(lab)) lab <- m
+      if(nrow(df)==0 || !m %in% names(df))
+        return(div(class="v629-lbp-card", tags$h4(lab), div("No data for the selected filters.")))
+      x <- suppressWarnings(as.numeric(df[[m]]))
+      o <- if(lb_higher(m)) -x else x
+      o[!is.finite(o)] <- Inf
+      d <- df[order(o, df$Player),,drop=FALSE]
+      a <- lb_team_avg(d, m)
+      rows <- lapply(seq_len(nrow(d)), function(i){
+        v <- d[[m]][i]
+        tags$tr(tags$td(i), tags$td(as.character(d$Player[i])),
+                tags$td(class=paste("v", lb_class(v,a,m)), lb_display(m,v)))
+      })
+      div(class="v629-lbp-card", tags$h4(lab),
+          tags$table(tags$thead(tags$tr(tags$th("#"), tags$th("Player"), tags$th(class="v", lab))),
+                     tags$tbody(rows)),
+          div(style="font-size:11px;color:#666;margin-top:4px;", paste0("Team average: ", lb_display(m, a))))
+    })
+    div(
+      div(class="v629-lbp-head",
+          div(class="v629-lbp-title", paste0("Team Leaderboards — ", type_label)),
+          div(class="v629-lbp-meta", paste0(sess_label, if(nzchar(dr_label)) paste0(" · ", dr_label) else "",
+                                            " · Printed ", format(Sys.Date(), "%b %d, %Y")))),
+      div(class="v629-lbp-grid", cards)
+    )
+  })
+  outputOptions(output, "v629_lb_print_area", suspendWhenHidden=FALSE)
+  
   observeEvent(input$leaderboard_refresh,{refresh_sessions_admin_data();load_sessions(select_session_id=current_session_id());load_pitcher_report_data();load_report_pitches()})
   
   # ==================================================
@@ -10361,7 +10586,7 @@ server <- function(input, output, session) {
     })
     
     tryCatch({
-      pa_data <- googlesheets4::range_read(
+      pa_data <- v629_range_read(
         ss = SHEET_URL,
         sheet = "Plate_Appearances",
         col_names = TRUE
@@ -12254,87 +12479,62 @@ server <- function(input, output, session) {
     # Spatial smoothing.
     bandwidth <- 0.085
     
+    # V62.9: same math as before (Gaussian-weighted average at each grid
+    # point, density-based fade), but computed for all grid points at once
+    # instead of one at a time. Identical picture, much faster to draw.
     grid_cells <- character(0)
     
-    for (row in seq_len(n_rows)) {
+    if (nrow(spatial_data) > 0) {
       
-      for (col in seq_len(n_cols)) {
-        
-        # Grid point in DISPLAY-WINDOW coordinates.
-        gx <- (col - 0.5) / n_cols
-        gy <- (row - 0.5) / n_rows
-        
-        # Convert display point back into the original
-        # normalized 0-1 charting coordinate system.
-        cx <- x_min + gx * (x_max - x_min)
-        cy <- y_min + gy * (y_max - y_min)
-        
-        rate <- NA_real_
-        opacity <- 0
-        
-        if (nrow(spatial_data) > 0) {
-          
-          distances <- sqrt(
-            (spatial_data$X - cx)^2 +
-              (spatial_data$Y - cy)^2
-          )
-          
-          weights <- exp(
-            -0.5 * (distances / bandwidth)^2
-          )
-          
-          weight_sum <- sum(
-            weights,
-            na.rm = TRUE
-          )
-          
-          if (
-            is.finite(weight_sum) &&
-            weight_sum > 0.015
-          ) {
-            
-            rate <- 100 * sum(
-              weights * spatial_data$Value,
-              na.rm = TRUE
-            ) / weight_sum
-            
-            # Density-based opacity. Sparse areas fade
-            # gradually to white instead of ending at a
-            # hard radius.
-            opacity <- 1 - exp(
-              -0.42 * weight_sum
-            )
-            
-            opacity <- max(
-              0,
-              min(
-                0.96,
-                opacity
-              )
-            )
-          }
-        }
-        
-        if (!is.na(rate) && opacity > 0.02) {
-          
-          fill <- spatial_heat_color(rate)
-          
-          x <- plot_x + (col - 1) * cell_w
-          y <- plot_y + (row - 1) * cell_h
-          
-          grid_cells <- c(
-            grid_cells,
-            paste0(
-              '<rect x="', round(x, 2),
-              '" y="', round(y, 2),
-              '" width="', round(cell_w + 0.8, 2),
-              '" height="', round(cell_h + 0.8, 2),
-              '" fill="', fill,
-              '" fill-opacity="', round(opacity, 3),
-              '" stroke="none"/>'
-            )
-          )
-        }
+      grid_col <- rep(seq_len(n_cols), times = n_rows)
+      grid_row <- rep(seq_len(n_rows), each = n_cols)
+      
+      # Grid point in DISPLAY-WINDOW coordinates, converted back into the
+      # original normalized 0-1 charting coordinate system.
+      cx <- x_min + ((grid_col - 0.5) / n_cols) * (x_max - x_min)
+      cy <- y_min + ((grid_row - 0.5) / n_rows) * (y_max - y_min)
+      
+      px <- as.numeric(spatial_data$X)
+      py <- as.numeric(spatial_data$Y)
+      pv <- as.numeric(spatial_data$Value)
+      pv[is.na(pv)] <- 0
+      
+      n_pts <- length(cx)
+      weight_sum <- numeric(n_pts)
+      weighted_val <- numeric(n_pts)
+      
+      # Work in chunks so very large samples never use much memory.
+      for (idx in split(seq_len(n_pts), ceiling(seq_len(n_pts) / 400))) {
+        d2 <- outer(cx[idx], px, "-")^2 + outer(cy[idx], py, "-")^2
+        w <- exp(-0.5 * d2 / bandwidth^2)
+        w[is.na(w)] <- 0
+        weight_sum[idx] <- rowSums(w)
+        weighted_val[idx] <- as.vector(w %*% pv)
+      }
+      
+      ok <- is.finite(weight_sum) & weight_sum > 0.015
+      rate <- rep(NA_real_, n_pts)
+      rate[ok] <- 100 * weighted_val[ok] / weight_sum[ok]
+      
+      # Density-based opacity. Sparse areas fade gradually to white.
+      opacity <- rep(0, n_pts)
+      opacity[ok] <- pmax(0, pmin(0.96, 1 - exp(-0.42 * weight_sum[ok])))
+      
+      draw <- !is.na(rate) & opacity > 0.02
+      
+      if (any(draw)) {
+        fills <- vapply(rate[draw], spatial_heat_color, character(1))
+        x <- plot_x + (grid_col[draw] - 1) * cell_w
+        y <- plot_y + (grid_row[draw] - 1) * cell_h
+        grid_cells <- paste0(
+          '<rect x="', round(x, 2),
+          '" y="', round(y, 2),
+          '" width="', round(cell_w + 0.8, 2),
+          '" height="', round(cell_h + 0.8, 2),
+          '" fill="', fills,
+          '" fill-opacity="', round(opacity[draw], 3),
+          '" stroke="none"/>'
+        )
       }
     }
     
@@ -13152,6 +13352,27 @@ server <- function(input, output, session) {
         )
         append_row_atomic("Pitches",pitch_row_values)
         
+        # V62.9: remember everything this pitch is about to change, so
+        # UNDO LAST PITCH can put it all back exactly.
+        v629_push_undo(list(
+          session_id=as.character(session_id),
+          mode=chart_mode,
+          pitch_id=as.character(pitch_data_main$Pitch_ID[1]),
+          pa_id="",
+          pitch_result=as.character(pitch_result),
+          batter=if(identical(chart_mode,"Bullpen")) "" else as.character(batter_id_now[[1]]),
+          pitcher=as.character(pitcher_id_now[[1]]),
+          balls=balls_before, strikes=strikes_before,
+          outs=game_outs(),
+          pitch_number=pitch_number(), pa_number=pa_number(),
+          pa_pitch_count=pa_pitch_count(), after2k=pitches_after_2k(),
+          bullpen_count=bullpen_live_pitch_count(),
+          away_index=v628_away_index(), home_index=v628_home_index(),
+          inning=if(is.null(input$inning_number)||is.na(input$inning_number)) 1L else as.integer(input$inning_number),
+          half=if(is.null(input$inning_half)||!nzchar(input$inning_half)) "Top" else as.character(input$inning_half),
+          half_pitchers=v629_half_pitchers()
+        ))
+        
         save_status(
           paste0(
             "Saved Pitch ",
@@ -13399,6 +13620,7 @@ server <- function(input, output, session) {
         )
         pa_row_values<-c(unname(as.list(pa_data[1,])),unname(as.list(quab_extra_data[1,])))
         append_row_atomic("Plate_Appearances",pa_row_values)
+        v629_attach_pa_to_undo(as.character(pa_data$PA_ID[1]), result)
         
         save_status(
           paste0(
@@ -13712,6 +13934,23 @@ server <- function(input, output, session) {
       v628_ensure_game_architecture()
       v628_write_lineup_side("Away",input$v628_away_type,trimws(input$v628_away_name),away)
       v628_write_lineup_side("Home",input$v628_home_type,trimws(input$v628_home_name),home)
+      # V62.9: starting pitchers (lineup spot 0).
+      new_away_sp<-v60_chr(input$v629_away_sp_pick,""); new_home_sp<-v60_chr(input$v629_home_sp_pick,"")
+      for(sp_side in c("Away","Home")){
+        sp_id<-if(sp_side=="Away")new_away_sp else new_home_sp
+        if(!nzchar(sp_id))next
+        sp_type<-if(sp_side=="Away")v60_chr(input$v628_away_type,"Our") else v60_chr(input$v628_home_type,"Our")
+        sp_team<-if(sp_side=="Away")trimws(v60_chr(input$v628_away_name,"")) else trimws(v60_chr(input$v628_home_name,""))
+        append_row_atomic("Game_Lineups",list(unique_record_id("LINEUP"),current_org_id(),current_session_id(),sp_side,sp_type,sp_team,0L,sp_id,"Starting_Pitcher","TRUE",format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
+      }
+      # Only change who is pitching if the starter is new/changed, so editing
+      # a lineup mid-game never overrides a reliever who already came in.
+      hp<-v629_half_pitchers()
+      if(nzchar(new_home_sp)&&!identical(new_home_sp,v629_home_sp()))hp$Top<-new_home_sp
+      if(nzchar(new_away_sp)&&!identical(new_away_sp,v629_away_sp()))hp$Bottom<-new_away_sp
+      v629_half_pitchers(hp); v629_away_sp(new_away_sp); v629_home_sp(new_home_sp)
+      cur_sp<-hp[[v629_current_half()]]
+      if(nzchar(cur_sp)){ v628_refresh_lineup_choices(); updateSelectInput(session,"pitcher",selected=cur_sp) }
       v628_away_lineup(away);v628_home_lineup(home);v628_away_index(1L);v628_home_index(1L);v628_one_pa_override("")
       v628_away_team_type(v60_chr(input$v628_away_type,"Our"));v628_home_team_type(v60_chr(input$v628_home_type,"Our"))
       v628_away_team_name(v60_chr(input$v628_away_name,"Away"));v628_home_team_name(v60_chr(input$v628_home_name,"Home"))
@@ -13791,6 +14030,33 @@ server <- function(input, output, session) {
       picked <- v60_chr(input[[paste0(prefix,i)]],"")
       updateSelectizeInput(session,paste0(prefix,i),choices=c("— Empty —"="",choices),selected=picked)
     }
+    sp_id <- if(is_home)"v629_home_sp_pick" else "v629_away_sp_pick"
+    updateSelectizeInput(session,sp_id,choices=c("— Select starter —"="",choices),selected=v60_chr(input[[sp_id]],""))
+  }
+  
+  # V62.9: pitchers a side can start. Our roster = only Pitchers / Two-Way.
+  # Opponents = that team's saved players (positions aren't stored for them).
+  v629_sp_choices <- function(team_type,team_name){
+    if(!identical(team_type,"Our")) return(v628_choices_for("Opponent",team_name))
+    p <- v6265_normalize_player_schema(player_lookup())
+    if(nrow(p)==0 || !"Player_ID"%in%names(p)) return(character(0))
+    type_l <- tolower(trimws(as.character(p$Player_Type)))
+    p <- p[type_l %in% c("pitcher","two-way","two way","twoway"),,drop=FALSE]
+    if(nrow(p)==0) return(character(0))
+    out <- as.character(p$Player_ID)
+    names(out) <- if("Display_Name"%in%names(p)) as.character(p$Display_Name) else out
+    out
+  }
+  v629_sp_picker <- function(side){
+    is_home <- identical(side,"Home")
+    sp_id <- if(is_home)"v629_home_sp_pick" else "v629_away_sp_pick"
+    team_type <- if(is_home)v60_chr(input$v628_home_type,v628_home_team_type()) else v60_chr(input$v628_away_type,v628_away_team_type())
+    team_name <- isolate(if(is_home)v60_chr(input$v628_home_name,v628_home_team_name()) else v60_chr(input$v628_away_name,v628_away_team_name()))
+    picked <- isolate(input[[sp_id]])
+    selected <- if(!is.null(picked)) as.character(picked) else isolate(if(is_home)v629_home_sp() else v629_away_sp())
+    selectInput(sp_id,paste0(side," Starting Pitcher"),
+                choices=c("— Select starter —"="",v629_sp_choices(team_type,team_name)),
+                selected=selected,selectize=TRUE,width="100%")
   }
   v629_away_name_d <- debounce(reactive(input$v628_away_name),1000)
   v629_home_name_d <- debounce(reactive(input$v628_home_name),1000)
@@ -13815,12 +14081,14 @@ server <- function(input, output, session) {
                    column(6,
                           selectInput("v628_away_type","Away Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=isolate(v60_chr(input$v628_away_type,v628_away_team_type()))),
                           textInput("v628_away_name","Away Team Name",value=isolate(v60_chr(input$v628_away_name,v628_away_team_name()))),
+                          v629_sp_picker("Away"),
                           div(style="font-weight:900;font-size:16px;margin:8px 0 7px;","Away Batting Order"),
                           div(style="border:1px solid #d9dde3;border-radius:11px;padding:10px;background:#fff;",v628_lineup_card_builder("Away"))
                    ),
                    column(6,
                           selectInput("v628_home_type","Home Team",choices=c("Our Roster"="Our","Opponent"="Opponent"),selected=isolate(v60_chr(input$v628_home_type,v628_home_team_type()))),
                           textInput("v628_home_name","Home Team Name",value=isolate(v60_chr(input$v628_home_name,v628_home_team_name()))),
+                          v629_sp_picker("Home"),
                           div(style="font-weight:900;font-size:16px;margin:8px 0 7px;","Home Batting Order"),
                           div(style="border:1px solid #d9dde3;border-radius:11px;padding:10px;background:#fff;",v628_lineup_card_builder("Home"))
                    )
@@ -13926,6 +14194,7 @@ server <- function(input, output, session) {
     }
   },ignoreInit=TRUE)
   observeEvent(input$session_select,{
+    v629_away_sp("");v629_home_sp("")
     v628_lineups_ready(FALSE);v628_lineup_editing(TRUE);v628_away_lineup(character(0));v628_home_lineup(character(0));v628_away_index(1L);v628_home_index(1L);v628_one_pa_override("")
     v628_away_team_type("Our");v628_home_team_type("Our");v628_away_team_name("LaGrange");v628_home_team_name("LaGrange")
     tryCatch({
@@ -13934,6 +14203,12 @@ server <- function(input, output, session) {
         d<-d[as.character(d$Session_ID)==as.character(current_session_id()),,drop=FALSE]
         if(nrow(d)>0){
           d$Lineup_Spot<-suppressWarnings(as.integer(d$Lineup_Spot));d$.row_order<-seq_len(nrow(d));d<-d[order(d$Side,d$Lineup_Spot,d$.row_order),,drop=FALSE]
+          # V62.9: lineup spot 0 holds the starting pitcher, not a hitter.
+          sp_rows<-d[!is.na(d$Lineup_Spot)&d$Lineup_Spot==0L,,drop=FALSE]
+          d<-d[is.na(d$Lineup_Spot)|d$Lineup_Spot!=0L,,drop=FALSE]
+          sp_a<-sp_rows[sp_rows$Side=="Away",,drop=FALSE];sp_h<-sp_rows[sp_rows$Side=="Home",,drop=FALSE]
+          if(nrow(sp_a)>0)v629_away_sp(as.character(tail(sp_a$Player_ID,1)))
+          if(nrow(sp_h)>0)v629_home_sp(as.character(tail(sp_h$Player_ID,1)))
           a<-d[d$Side=="Away",,drop=FALSE];h<-d[d$Side=="Home",,drop=FALSE]
           if(nrow(a)>0){a<-a[!duplicated(a$Lineup_Spot,fromLast=TRUE),,drop=FALSE];a<-a[order(a$Lineup_Spot),];v628_away_lineup(as.character(a$Player_ID));v628_away_team_type(as.character(tail(a$Team_Type,1)));v628_away_team_name(as.character(tail(a$Team_Name,1)))}
           if(nrow(h)>0){h<-h[!duplicated(h$Lineup_Spot,fromLast=TRUE),,drop=FALSE];h<-h[order(h$Lineup_Spot),];v628_home_lineup(as.character(h$Player_ID));v628_home_team_type(as.character(tail(h$Team_Type,1)));v628_home_team_name(as.character(tail(h$Team_Name,1)))}
@@ -13961,6 +14236,7 @@ server <- function(input, output, session) {
   # Whenever a pitcher is selected during a live game, remember them for
   # the half-inning currently being played.
   observeEvent(input$pitcher,{
+    if(isTRUE(v629_restoring_pitcher)){ v629_restoring_pitcher <<- FALSE; return() }
     if(identical(input$charting_mode,"Bullpen")) return()
     p <- if(is.null(input$pitcher)) "" else trimws(as.character(input$pitcher))
     if(!nzchar(p)) return()
@@ -13974,6 +14250,7 @@ server <- function(input, output, session) {
   
   # When the half-inning flips, bring back that side's pitcher.
   observeEvent(input$inning_half,{
+    if(isTRUE(v629_restoring_half)){ v629_restoring_half <<- FALSE; return() }
     if(identical(input$charting_mode,"Bullpen")) return()
     # A new half-inning always starts a fresh count (0-0).
     # If a finished PA hasn't been cleared yet, move to the next PA number.
@@ -13995,9 +14272,13 @@ server <- function(input, output, session) {
     }
   },ignoreInit=TRUE)
   
-  # A new session starts with no remembered pitchers.
+  # A new session starts with its saved starting pitchers (if any).
+  # Home team pitches the TOP half; away team pitches the BOTTOM half.
   observeEvent(input$session_select,{
-    v629_half_pitchers(list(Top="",Bottom=""))
+    v629_undo_stack(list())
+    v629_half_pitchers(list(Top=v629_home_sp(),Bottom=v629_away_sp()))
+    sp <- v629_half_pitchers()[[v629_current_half()]]
+    if(nzchar(sp)) updateSelectInput(session,"pitcher",selected=sp)
   },ignoreInit=TRUE)
   
   # Safety check used before every live pitch is saved. If this half has no
@@ -14019,6 +14300,119 @@ server <- function(input, output, session) {
   # ==================================================
   # VALIDATION
   # ==================================================
+  
+  # ==================================================
+  # V62.9 — UNDO LAST PITCH
+  # ==================================================
+  # Every saved pitch records a snapshot of the game state from just BEFORE
+  # it. Undo deletes that pitch row (and the PA row, if the pitch ended the
+  # at-bat) from the sheet, then restores the count, outs, inning, batter
+  # and pitcher exactly as they were. You can undo several pitches in a row.
+  v629_push_undo <- function(snap){
+    st <- v629_undo_stack()
+    st[[length(st)+1L]] <- snap
+    if(length(st) > 40L) st <- st[(length(st)-39L):length(st)]
+    v629_undo_stack(st)
+  }
+  v629_attach_pa_to_undo <- function(pa_id, result){
+    st <- v629_undo_stack(); n <- length(st)
+    if(n == 0L) return(invisible(NULL))
+    st[[n]]$pa_id <- pa_id
+    st[[n]]$pa_result <- as.character(result)
+    v629_undo_stack(st)
+  }
+  v629_delete_row_by_id <- function(sheet_name, record_id){
+    if(is.null(record_id) || !nzchar(record_id)) return(FALSE)
+    ids <- v629_range_read(SHEET_URL, sheet=sheet_name, range="A:A",
+                                     col_names=FALSE, col_types="c")
+    hits <- which(trimws(as.character(ids[[1]])) == record_id)
+    if(length(hits) == 0L) return(FALSE)
+    v629_range_delete(SHEET_URL, sheet=sheet_name,
+                                range=googlesheets4::cell_rows(tail(hits,1)))
+    TRUE
+  }
+  v629_top_undo <- reactive({
+    st <- v629_undo_stack()
+    if(length(st) == 0L) return(NULL)
+    snap <- st[[length(st)]]
+    sid <- current_session_id()
+    if(is.null(sid) || !identical(as.character(sid), snap$session_id)) return(NULL)
+    snap
+  })
+  output$v629_undo_ui <- renderUI({
+    snap <- v629_top_undo()
+    if(is.null(snap)) return(NULL)
+    desc <- if(identical(snap$mode,"Bullpen")) snap$pitch_result else paste0(snap$pitch_result," (",snap$balls,"-",snap$strikes,")")
+    div(style="margin:10px 0 4px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
+        actionButton("v629_undo_btn", HTML("&#8630; UNDO LAST PITCH"), class="btn btn-default",
+                     style="font-weight:800;border:1px solid #c9ced6;"),
+        span(style="color:#667085;font-size:13px;", paste0("Last saved: ", desc,
+             if(!is.null(snap$pa_result) && nzchar(snap$pa_id)) paste0(" — ended PA: ", snap$pa_result) else "")))
+  })
+  observeEvent(input$v629_undo_btn,{
+    snap <- v629_top_undo()
+    if(is.null(snap)) return()
+    who <- if(nzchar(snap$batter)) paste0(" to ", v628_player_label(snap$batter)) else ""
+    extra <- if(nzchar(snap$pa_id)) tags$p(style="color:#a00000;font-weight:700;",
+                 paste0("This pitch ended the at-bat (", snap$pa_result, "), so the PA will be removed too and the count, outs and batter will go back.")) else NULL
+    showModal(modalDialog(
+      title="Undo last pitch?",
+      tags$p(paste0("Remove the last pitch: ", snap$pitch_result,
+                    if(!identical(snap$mode,"Bullpen")) paste0(" on a ", snap$balls, "-", snap$strikes, " count") else "",
+                    who, ".")),
+      extra,
+      footer=tagList(modalButton("Cancel"),
+                     actionButton("v629_undo_confirm","UNDO",class="btn btn-danger")),
+      easyClose=TRUE
+    ))
+  })
+  observeEvent(input$v629_undo_confirm,{
+    removeModal()
+    snap <- v629_top_undo()
+    if(is.null(snap)) return()
+    ok <- tryCatch({
+      if(nzchar(snap$pa_id)) v629_delete_row_by_id("Plate_Appearances", snap$pa_id)
+      v629_delete_row_by_id("Pitches", snap$pitch_id)
+      TRUE
+    }, error=function(e){ save_status(paste0("Undo error: ", e$message)); FALSE })
+    if(!isTRUE(ok)) return()
+    st <- v629_undo_stack(); v629_undo_stack(st[-length(st)])
+    
+    # Clear whatever was half-entered for the next pitch.
+    selected_pitch_type("None"); selected_zone(NULL); selected_location_x(NULL); selected_location_y(NULL)
+    in_play_active(FALSE); selected_contact_quality(NULL); selected_in_play_result(NULL)
+    pa_complete(FALSE); pa_result(NULL); last_pitch_result("None")
+    pitch_number(snap$pitch_number)
+    
+    if(identical(snap$mode,"Bullpen")){
+      bullpen_target_x(NULL); bullpen_target_y(NULL); bullpen_target_zone(NULL)
+      bullpen_live_pitch_count(snap$bullpen_count)
+      save_status(paste0("Undid last pitch (", snap$pitch_result, ")."))
+      return()
+    }
+    
+    balls(snap$balls); strikes(snap$strikes); game_outs(snap$outs)
+    pa_number(snap$pa_number); pa_pitch_count(snap$pa_pitch_count); pitches_after_2k(snap$after2k)
+    v628_away_index(snap$away_index); v628_home_index(snap$home_index)
+    v629_half_pitchers(snap$half_pitchers)
+    
+    cur_half <- if(is.null(input$inning_half)) "Top" else as.character(input$inning_half)
+    if(!identical(cur_half, snap$half)){
+      v629_restoring_half <<- TRUE
+      updateRadioButtons(session,"inning_half",selected=snap$half)
+    }
+    updateNumericInput(session,"inning_number",value=snap$inning)
+    cur_p <- if(is.null(input$pitcher)) "" else as.character(input$pitcher)
+    if(!identical(cur_p, snap$pitcher)){
+      v629_restoring_pitcher <<- TRUE
+      updateSelectInput(session,"pitcher",selected=snap$pitcher)
+    }
+    if(!isTRUE(v628_lineups_ready()) && nzchar(snap$batter)) updateSelectInput(session,"batter",selected=snap$batter)
+    
+    save_status(paste0("Undid last pitch (", snap$pitch_result,
+                       if(nzchar(snap$pa_id)) paste0(" — ", snap$pa_result, " removed") else "",
+                       "). Count is back to ", snap$balls, "-", snap$strikes, "."))
+  })
   
   pitch_ready <- function() {
     
@@ -16326,8 +16720,8 @@ server <- function(input, output, session) {
       "Enabled","Package","Notes"
     )
     if(!"Entitlements" %in% existing){
-      googlesheets4::sheet_add(SHEET_URL,"Entitlements")
-      googlesheets4::range_write(
+      v629_sheet_add(SHEET_URL,"Entitlements")
+      v629_range_write(
         ss=SHEET_URL,
         data=as.data.frame(as.list(setNames(headers,headers)),stringsAsFactors=FALSE,check.names=FALSE),
         sheet="Entitlements",range="A1:G1",col_names=FALSE
@@ -16366,7 +16760,7 @@ server <- function(input, output, session) {
   load_entitlements <- function(){
     tryCatch({
       d <- as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,sheet="Entitlements",range="A1:G1001",col_names=TRUE
         ),stringsAsFactors=FALSE
       )
@@ -16590,7 +16984,7 @@ server <- function(input, output, session) {
   
   v622_sheet_exists <- function(sheet_name){
     tryCatch({
-      googlesheets4::range_read(
+      v629_range_read(
         ss=SHEET_URL,
         sheet=sheet_name,
         range="A1:A1",
@@ -16603,14 +16997,14 @@ server <- function(input, output, session) {
   
   v622_create_sheet_with_headers <- function(sheet_name,headers){
     if(!v622_sheet_exists(sheet_name)){
-      googlesheets4::sheet_add(SHEET_URL,sheet_name)
+      v629_sheet_add(SHEET_URL,sheet_name)
       header <- as.data.frame(
         as.list(setNames(headers,headers)),
         stringsAsFactors=FALSE,
         check.names=FALSE
       )
       last_col <- if(length(headers)<=26) LETTERS[length(headers)] else stop("Too many onboarding header columns.")
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=header,
         sheet=sheet_name,
@@ -16644,14 +17038,14 @@ server <- function(input, output, session) {
         c("User_ID","Organization_ID","Display_Name","Email","Role","Active")
       )
       d <- as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,sheet="Users",range="A1:F1001",col_names=TRUE,col_types="c"
         ),stringsAsFactors=FALSE
       )
       has_users <- nrow(d)>0 && "User_ID" %in% names(d) &&
         any(!is.na(d$User_ID) & trimws(as.character(d$User_ID))!="")
       if(!has_users){
-        googlesheets4::sheet_append(
+        v629_sheet_append(
           ss=SHEET_URL,
           data=data.frame(
             User_ID="LAGRANGE_USER_NATE_MARKO",
@@ -16693,7 +17087,7 @@ server <- function(input, output, session) {
       # Sessions already exists in the live backend. Only ensure the two
       # season/period header cells used by the architecture; do not enumerate
       # workbook sheets or perform any destructive maintenance here.
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL,
         data=data.frame(Season_ID="Season_ID",Period_ID="Period_ID",stringsAsFactors=FALSE),
         sheet="Sessions",range="M1:N1",col_names=FALSE
@@ -16751,7 +17145,7 @@ server <- function(input, output, session) {
   v623_sheet_headers_match <- function(sheet_name,headers){
     tryCatch({
       last_col <- if(length(headers)<=26) LETTERS[length(headers)] else stop("Too many onboarding header columns.")
-      x <- as.data.frame(googlesheets4::range_read(
+      x <- as.data.frame(v629_range_read(
         ss=SHEET_URL, sheet=sheet_name,
         range=paste0("A1:",last_col,"1"),
         col_names=FALSE, col_types="c"
@@ -16768,7 +17162,7 @@ server <- function(input, output, session) {
     if(!v622_sheet_exists(sheet_name)){
       add_error <- NULL
       tryCatch(
-        googlesheets4::sheet_add(SHEET_URL,sheet_name),
+        v629_sheet_add(SHEET_URL,sheet_name),
         error=function(e) add_error <<- e
       )
       if(!v622_sheet_exists(sheet_name)){
@@ -16785,7 +17179,7 @@ server <- function(input, output, session) {
         stringsAsFactors=FALSE, check.names=FALSE
       )
       last_col <- if(length(headers)<=26) LETTERS[length(headers)] else stop("Too many onboarding header columns.")
-      googlesheets4::range_write(
+      v629_range_write(
         ss=SHEET_URL, data=header, sheet=sheet_name,
         range=paste0("A1:",last_col,"1"), col_names=FALSE
       )
@@ -16841,7 +17235,7 @@ server <- function(input, output, session) {
   load_organizations <- function(){
     tryCatch({
       d <- as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet="Organizations",
           range="A1:I5000",
@@ -16865,7 +17259,7 @@ server <- function(input, output, session) {
   load_user_directory <- function(){
     tryCatch({
       d <- as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,
           sheet="Users",
           range="A1:F5000",
@@ -16951,7 +17345,7 @@ server <- function(input, output, session) {
       org <- current_org_id()
       
       s <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F5000",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F5000",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(s)>0 && "Season_ID"%in%names(s)){
@@ -16962,7 +17356,7 @@ server <- function(input, output, session) {
       seasons_directory(s)
       
       p <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I5000",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Periods",range="A1:I5000",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(p)>0 && "Period_ID"%in%names(p)){
@@ -16973,7 +17367,7 @@ server <- function(input, output, session) {
       periods_directory(p)
       
       sub <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G5000",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G5000",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(sub)>0 && "Subscription_ID"%in%names(sub)){
@@ -16984,7 +17378,7 @@ server <- function(input, output, session) {
       subscriptions_directory(sub)
       
       rm <- v49_normalize_sheet_data(as.data.frame(
-        googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H10000",col_names=TRUE),
+        v629_range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H10000",col_names=TRUE),
         stringsAsFactors=FALSE
       ),"generic")
       if(nrow(rm)>0 && "Roster_Membership_ID"%in%names(rm)){
@@ -17022,7 +17416,7 @@ server <- function(input, output, session) {
   load_entitlements <- function(){
     tryCatch({
       d <- as.data.frame(
-        googlesheets4::range_read(
+        v629_range_read(
           ss=SHEET_URL,sheet="Entitlements",range="A1:G5000",col_names=TRUE
         ),stringsAsFactors=FALSE
       )
@@ -17430,19 +17824,19 @@ server <- function(input, output, session) {
     if(have_all && !isTRUE(force)) return(invisible(TRUE))
     
     v6262_all_seasons(v6262_clean_arch(
-      googlesheets4::range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F5000",col_names=TRUE),
+      v629_range_read(ss=SHEET_URL,sheet="Seasons",range="A1:F5000",col_names=TRUE),
       "Season_ID"
     ))
     v6262_all_periods(v6262_clean_arch(
-      googlesheets4::range_read(ss=SHEET_URL,sheet="Periods",range="A1:I5000",col_names=TRUE),
+      v629_range_read(ss=SHEET_URL,sheet="Periods",range="A1:I5000",col_names=TRUE),
       "Period_ID"
     ))
     v6262_all_subscriptions(v6262_clean_arch(
-      googlesheets4::range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G5000",col_names=TRUE),
+      v629_range_read(ss=SHEET_URL,sheet="Subscriptions",range="A1:G5000",col_names=TRUE),
       "Subscription_ID"
     ))
     v6262_all_roster_memberships(v6262_clean_arch(
-      googlesheets4::range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H10000",col_names=TRUE),
+      v629_range_read(ss=SHEET_URL,sheet="Roster_Memberships",range="A1:H10000",col_names=TRUE),
       "Roster_Membership_ID"
     ))
     invisible(TRUE)
@@ -17544,6 +17938,111 @@ server <- function(input, output, session) {
       list(platform_admin=isTRUE(v625_is_platform_admin()))
     )
   }
+  
+  # ==================================================
+  # V62.9 — RE-SCORE SAVED PITCHES (platform owner only)
+  # ==================================================
+  # Scores are stored on each pitch row when it is charted. When the
+  # scoring rules change, this recalculates Base_Decision_Value,
+  # Contact_Modifier and Pitch_Score (columns T:V) for saved LIVE pitches
+  # using the current rules. Bullpen rows are never touched.
+  # PREVIEW shows exactly what would change; nothing is written until APPLY.
+  v629_rescore_preview <- reactiveVal(NULL)
+  v629_rescore_msg <- reactiveVal(NULL)
+  
+  v629_compute_rescore <- function(){
+    raw <- v629_range_read(SHEET_URL, sheet="Pitches", range="A:AO",
+                                     col_names=TRUE, col_types="c")
+    need <- c("Pitch_ID","Zone","Strikes_Before","Pitch_Result")
+    miss <- need[!need %in% names(raw)]
+    if(length(miss)>0) stop(paste0("Pitches tab is missing: ", paste(miss, collapse=", ")))
+    hdr <- names(raw)[20:22]
+    if(!identical(hdr, c("Base_Decision_Value","Contact_Modifier","Pitch_Score")))
+      stop(paste0("Expected columns T:V to be Base_Decision_Value / Contact_Modifier / Pitch_Score but found: ",
+                  paste(hdr, collapse=" / "), ". Nothing was changed."))
+    num <- function(x){ x <- trimws(as.character(x)); x[is.na(x)] <- ""; out <- suppressWarnings(as.numeric(x)); out[x==""] <- NA_real_; out }
+    old_base <- num(raw[[20]]); old_mod <- num(raw[[21]]); old_score <- num(raw[[22]])
+    bad_text <- function(x, v){ x <- trimws(as.character(x)); !is.na(x) & x!="" & is.na(v) }
+    if(any(bad_text(raw[[20]],old_base) | bad_text(raw[[21]],old_mod) | bad_text(raw[[22]],old_score)))
+      stop("Some score cells contain text instead of numbers, so re-scoring was stopped to protect the sheet. Nothing was changed.")
+    chr <- function(col){ if(!col %in% names(raw)) return(rep("", nrow(raw))); x <- as.character(raw[[col]]); x[is.na(x)] <- ""; trimws(x) }
+    pid <- chr("Pitch_ID"); mode <- chr("Charting_Mode")
+    zone <- chr("Zone"); sb <- chr("Strikes_Before"); pr <- chr("Pitch_Result")
+    cq <- chr("Contact_Quality"); par <- chr("PA_Result_On_Pitch")
+    new_base <- old_base; new_mod <- old_mod; new_score <- old_score
+    live <- nzchar(pid) & mode != "Bullpen"
+    for(i in which(live)){
+      d <- tryCatch(score_pitch_decision_details(zone=zone[i], strikes_before=sb[i], pitch_result=pr[i],
+                                                 contact_quality=cq[i], pa_result_on_pitch=par[i]),
+                    error=function(e) NULL)
+      if(is.null(d) || is.na(d$Base_Decision_Score[1])) next
+      new_base[i] <- d$Base_Decision_Score[1]; new_mod[i] <- d$Execution_Modifier[1]; new_score[i] <- d$Final_Pitch_Score[1]
+    }
+    same <- function(a,b) (is.na(a) & is.na(b)) | (!is.na(a) & !is.na(b) & abs(a-b) < 1e-9)
+    changed <- !(same(old_base,new_base) & same(old_mod,new_mod) & same(old_score,new_score))
+    grp <- character(0)
+    if(any(changed)){
+      zg <- vapply(zone[changed], score_zone_group, character(1))
+      cs <- vapply(sb[changed], score_count_state, character(1))
+      grp <- paste0(zg, " · ", cs, " · ", pr[changed],
+                    ifelse(nzchar(par[changed]), paste0(" (", par[changed], ")"), ""),
+                    ":  score ", ifelse(is.na(old_score[changed]),"blank",old_score[changed]),
+                    " → ", new_score[changed])
+    }
+    list(n_rows=nrow(raw), n_live=sum(live), n_changed=sum(changed),
+         groups=sort(table(grp), decreasing=TRUE),
+         new_base=new_base, new_mod=new_mod, new_score=new_score)
+  }
+  
+  output$v629_rescore_card <- renderUI({
+    if(!isTRUE(v625_is_platform_admin())) return(NULL)
+    pv <- v629_rescore_preview(); msg <- v629_rescore_msg()
+    div(class="admin-card",
+        div(class="admin-title","Re-score Saved Pitches"),
+        div(class="admin-note",
+            "Recalculates the stored decision scores for every saved live pitch using the current scoring rules. ",
+            "Use this after a scoring rule changes. Click PREVIEW first; nothing is written until you click APPLY. ",
+            "Run it when nobody is charting."),
+        div(class="admin-toolbar",
+            actionButton("v629_rescore_preview_btn","PREVIEW CHANGES"),
+            if(!is.null(pv) && pv$n_changed>0) actionButton("v629_rescore_apply_btn", paste0("APPLY TO ", pv$n_changed, " PITCHES")) else NULL),
+        if(!is.null(msg)) div(class="admin-note", style="font-weight:700;", msg) else NULL,
+        if(!is.null(pv)) div(
+          div(style="margin-top:8px;font-weight:700;",
+              paste0(pv$n_changed, " of ", pv$n_live, " live pitches would change.")),
+          if(pv$n_changed>0) tags$table(class="table table-condensed", style="margin-top:6px;max-width:720px;",
+            tags$thead(tags$tr(tags$th("Situation"), tags$th(style="text-align:right;","Pitches"))),
+            tags$tbody(lapply(names(pv$groups), function(g) tags$tr(tags$td(g), tags$td(style="text-align:right;", as.integer(pv$groups[[g]])))))
+          ) else NULL
+        ) else NULL
+    )
+  })
+  
+  observeEvent(input$v629_rescore_preview_btn,{
+    if(!isTRUE(v625_is_platform_admin())) return()
+    v629_rescore_msg("Reading the Pitches tab…")
+    pv <- tryCatch(v629_compute_rescore(), error=function(e){ v629_rescore_msg(paste0("Preview error: ", e$message)); NULL })
+    v629_rescore_preview(pv)
+    if(!is.null(pv)) v629_rescore_msg(NULL)
+  })
+  
+  observeEvent(input$v629_rescore_apply_btn,{
+    if(!isTRUE(v625_is_platform_admin())) return()
+    # Re-read right before writing so row positions are current.
+    pv <- tryCatch(v629_compute_rescore(), error=function(e){ v629_rescore_msg(paste0("Re-score error: ", e$message)); NULL })
+    if(is.null(pv)) return()
+    if(pv$n_changed==0){ v629_rescore_msg("Nothing to change — every saved pitch already matches the current rules."); v629_rescore_preview(pv); return() }
+    ok <- tryCatch({
+      out <- data.frame(Base_Decision_Value=pv$new_base, Contact_Modifier=pv$new_mod, Pitch_Score=pv$new_score)
+      v629_range_write(ss=SHEET_URL, data=out, sheet="Pitches",
+                                 range=paste0("T2:V", pv$n_rows+1), col_names=FALSE, reformat=FALSE)
+      TRUE
+    }, error=function(e){ v629_rescore_msg(paste0("Re-score error: ", e$message)); FALSE })
+    if(!isTRUE(ok)) return()
+    v629_rescore_preview(NULL)
+    v629_rescore_msg(paste0("Done — re-scored ", pv$n_changed, " pitches. Reports will show the new scores the next time they load."))
+    try(load_report_pitches(), silent=TRUE)
+  })
   
   # Push owner-only card visibility whenever the development identity changes.
   observeEvent(active_user_id(),{
