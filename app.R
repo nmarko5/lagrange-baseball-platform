@@ -3814,6 +3814,7 @@ server <- function(input, output, session) {
   v629_home_sp <- reactiveVal("")
   v629_undo_stack <- reactiveVal(list())
   v629_restoring_half <- FALSE
+  v629_game_arch_checked <- FALSE
   v629_restoring_pitcher <- FALSE
   
   report_pitches <- reactiveVal(data.frame())
@@ -3936,6 +3937,7 @@ server <- function(input, output, session) {
   # V62.8 — GAME / OPPONENT ARCHITECTURE
   # ==================================================
   v628_ensure_game_architecture <- function(){
+    if(isTRUE(v629_game_arch_checked)) return(invisible(TRUE))
     existing <- googlesheets4::sheet_names(SHEET_URL)
     specs <- list(
       Opponent_Players=c("Opponent_Player_ID","Organization_ID","Opponent_Team","Display_Name","Jersey_Number","Bats","Throws","Active"),
@@ -3947,16 +3949,37 @@ server <- function(input, output, session) {
         cols<-specs[[nm]]
         header<-as.data.frame(as.list(setNames(cols,cols)),stringsAsFactors=FALSE,check.names=FALSE)
         v629_range_write(ss=SHEET_URL,data=header,sheet=nm,range=paste0("A1:",LETTERS[length(cols)],"1"),col_names=FALSE)
+      } else {
+        # V62.9: a tab that exists but is completely empty gets its header row.
+        a1 <- tryCatch(googlesheets4::range_read(ss=SHEET_URL,sheet=nm,range="A1:A1",col_names=FALSE,col_types="c"),error=function(e)NULL)
+        if(!is.null(a1) && (nrow(a1)==0 || ncol(a1)==0)){
+          cols<-specs[[nm]]
+          header<-as.data.frame(as.list(setNames(cols,cols)),stringsAsFactors=FALSE,check.names=FALSE)
+          v629_range_write(ss=SHEET_URL,data=header,sheet=nm,range=paste0("A1:",LETTERS[length(cols)],"1"),col_names=FALSE)
+        }
       }
     }
+    v629_game_arch_checked <<- TRUE
     invisible(TRUE)
   }
   v628_read_sheet <- function(sheet_name, range=NULL){
     tryCatch({
       v628_ensure_game_architecture()
-      as.data.frame(v629_range_read(ss=SHEET_URL,sheet=sheet_name,range=range,col_names=TRUE),stringsAsFactors=FALSE)
+      d <- as.data.frame(v629_range_read(ss=SHEET_URL,sheet=sheet_name,range=range,col_names=TRUE,col_types="c"),stringsAsFactors=FALSE)
+      # V62.9: safety net — if row 1 is data instead of column names, read it
+      # without headers and apply the known column names, so saved rows still load.
+      known <- v629_game_tab_columns[[sheet_name]]
+      if(!is.null(known) && ncol(d)>0 && !known[1] %in% names(d)){
+        d <- as.data.frame(v629_range_read(ss=SHEET_URL,sheet=sheet_name,range=range,col_names=FALSE,col_types="c"),stringsAsFactors=FALSE)
+        n <- min(ncol(d), length(known)); d <- d[,seq_len(n),drop=FALSE]; names(d) <- known[seq_len(n)]
+      }
+      d
     },error=function(e)data.frame(stringsAsFactors=FALSE))
   }
+  v629_game_tab_columns <- list(
+    Opponent_Players=c("Opponent_Player_ID","Organization_ID","Opponent_Team","Display_Name","Jersey_Number","Bats","Throws","Active"),
+    Game_Lineups=c("Lineup_Record_ID","Organization_ID","Session_ID","Side","Team_Type","Team_Name","Lineup_Spot","Player_ID","Player_Source","Active","Created_At")
+  )
   v60_chr <- function(x,default=""){
     if(is.null(x)||length(x)==0)return(default)
     x<-as.character(x[1])
@@ -14202,7 +14225,27 @@ server <- function(input, output, session) {
       if(nrow(d)>0&&all(c("Session_ID","Side","Lineup_Spot","Player_ID")%in%names(d))){
         d<-d[as.character(d$Session_ID)==as.character(current_session_id()),,drop=FALSE]
         if(nrow(d)>0){
-          d$Lineup_Spot<-suppressWarnings(as.integer(d$Lineup_Spot));d$.row_order<-seq_len(nrow(d));d<-d[order(d$Side,d$Lineup_Spot,d$.row_order),,drop=FALSE]
+          d$Lineup_Spot<-suppressWarnings(as.integer(d$Lineup_Spot));d$.row_order<-seq_len(nrow(d))
+          # V62.9: a lineup can be saved several times (edits) and SUBs add single
+          # rows. For each side: find the most recent FULL save (the last time spot 1
+          # was written), use that save's length, and apply any later SUB rows on top.
+          # Older, longer saves can no longer leave extra hitters in the order.
+          if("Created_At"%in%names(d)){
+            ts<-suppressWarnings(as.POSIXct(as.character(d$Created_At),format="%Y-%m-%d %H:%M:%S"))
+            keep<-rep(TRUE,nrow(d))
+            for(sd in unique(as.character(d$Side))){
+              ix<-which(as.character(d$Side)==sd & !is.na(ts))
+              s1<-ix[!is.na(d$Lineup_Spot[ix]) & d$Lineup_Spot[ix]==1L]
+              if(length(s1)==0) next
+              t1<-max(ts[s1])
+              batch<-ix[ts[ix]>=t1-5 & ts[ix]<=t1+120 & !is.na(d$Lineup_Spot[ix]) & d$Lineup_Spot[ix]>=1L]
+              L<-max(d$Lineup_Spot[batch])
+              hitters<-ix[!is.na(d$Lineup_Spot[ix]) & d$Lineup_Spot[ix]>=1L]
+              keep[hitters]<-ts[hitters]>=t1-5 & d$Lineup_Spot[hitters]<=L
+            }
+            d<-d[keep,,drop=FALSE]
+          }
+          d<-d[order(d$Side,d$Lineup_Spot,d$.row_order),,drop=FALSE]
           # V62.9: lineup spot 0 holds the starting pitcher, not a hitter.
           sp_rows<-d[!is.na(d$Lineup_Spot)&d$Lineup_Spot==0L,,drop=FALSE]
           d<-d[is.na(d$Lineup_Spot)|d$Lineup_Spot!=0L,,drop=FALSE]
