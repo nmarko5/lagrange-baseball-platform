@@ -3815,6 +3815,17 @@ server <- function(input, output, session) {
   v629_undo_stack <- reactiveVal(list())
   v629_restoring_half <- FALSE
   v629_game_arch_checked <- FALSE
+  # V62.9: run a step safely. If it errors, show the error on screen (red
+  # pop-up + status line) instead of silently dropping the coach's connection.
+  v629_safe <- function(label, expr){
+    tryCatch(expr, error=function(e){
+      msg <- paste0(label, " error: ", conditionMessage(e))
+      message("*** ", msg)
+      try(save_status(msg), silent=TRUE)
+      try(showNotification(msg, type="error", duration=NULL), silent=TRUE)
+      invisible(NULL)
+    })
+  }
   v629_restoring_pitcher <- FALSE
   
   report_pitches <- reactiveVal(data.frame())
@@ -3972,6 +3983,12 @@ server <- function(input, output, session) {
       if(!is.null(known) && ncol(d)>0 && !known[1] %in% names(d)){
         d <- as.data.frame(v629_range_read(ss=SHEET_URL,sheet=sheet_name,range=range,col_names=FALSE,col_types="c"),stringsAsFactors=FALSE)
         n <- min(ncol(d), length(known)); d <- d[,seq_len(n),drop=FALSE]; names(d) <- known[seq_len(n)]
+      }
+      # V62.9: drop completely blank rows (an explicit range like A1:H5000
+      # can come back as thousands of empty rows).
+      if(nrow(d)>0){
+        filled <- rowSums(!is.na(d) & trimws(as.matrix(d))!="") > 0
+        d <- d[filled,,drop=FALSE]
       }
       d
     },error=function(e)data.frame(stringsAsFactors=FALSE))
@@ -13903,14 +13920,14 @@ server <- function(input, output, session) {
       out<-as.character(p$Player_ID); names(out)<-nm; return(out)
     }
     o<-v628_opponent_players(); if(nrow(o)==0)return(character(0))
-    if("Organization_ID"%in%names(o))o<-o[trimws(as.character(o$Organization_ID))==current_org_id(),,drop=FALSE]
-    if(nzchar(trimws(team_name))&&"Opponent_Team"%in%names(o))o<-o[tolower(trimws(as.character(o$Opponent_Team)))==tolower(trimws(team_name)),,drop=FALSE]
+    if("Organization_ID"%in%names(o))o<-o[which(trimws(as.character(o$Organization_ID))==current_org_id()),,drop=FALSE]
+    if(nzchar(trimws(team_name))&&"Opponent_Team"%in%names(o))o<-o[which(tolower(trimws(as.character(o$Opponent_Team)))==tolower(trimws(team_name))),,drop=FALSE]
     if(nrow(o)==0)return(character(0))
-    out<-as.character(o$Opponent_Player_ID); names(out)<-paste0(ifelse(is.na(o$Jersey_Number)||o$Jersey_Number=="","",paste0("#",o$Jersey_Number," ")),o$Display_Name); out
+    out<-as.character(o$Opponent_Player_ID); names(out)<-paste0(ifelse(is.na(o$Jersey_Number)|o$Jersey_Number=="","",paste0("#",o$Jersey_Number," ")),o$Display_Name); out
   }
   v628_refresh_opponents <- function(){
     d<-v628_read_sheet("Opponent_Players","A1:H5000")
-    if(nrow(d)>0&&"Organization_ID"%in%names(d))d<-d[trimws(as.character(d$Organization_ID))==current_org_id(),,drop=FALSE]
+    if(nrow(d)>0&&"Organization_ID"%in%names(d))d<-d[which(trimws(as.character(d$Organization_ID))==current_org_id()),,drop=FALSE]
     v628_opponent_players(d)
   }
   v628_refresh_lineup_choices <- function(){
@@ -13982,8 +13999,8 @@ server <- function(input, output, session) {
       save_status("Lineups saved. Automatic batter rotation is ON.")
     },error=function(e)save_status(paste0("Lineup save error: ",e$message)))
   })
-  observeEvent(input$v628_edit_lineups,{v628_lineup_editing(TRUE); v628_refresh_lineup_choices()})
-  observeEvent(input$v628_cancel_edit,{v628_lineup_editing(FALSE)})
+  observeEvent(input$v628_edit_lineups,{v629_safe("Edit lineups",{v628_lineup_editing(TRUE); v628_refresh_lineup_choices()})})
+  observeEvent(input$v628_cancel_edit,{v629_safe("Cancel edit",v628_lineup_editing(FALSE))})
   
   v628_advance_batter <- function(direction=1L){
     half<-if(is.null(input$inning_half))"Top"else as.character(input$inning_half)
@@ -14083,8 +14100,8 @@ server <- function(input, output, session) {
   }
   v629_away_name_d <- debounce(reactive(input$v628_away_name),1000)
   v629_home_name_d <- debounce(reactive(input$v628_home_name),1000)
-  observeEvent(v629_away_name_d(),{ isolate(v629_refresh_side_slots("Away")) },ignoreInit=TRUE)
-  observeEvent(v629_home_name_d(),{ isolate(v629_refresh_side_slots("Home")) },ignoreInit=TRUE)
+  observeEvent(v629_away_name_d(),{ v629_safe("Away roster",isolate(v629_refresh_side_slots("Away"))) },ignoreInit=TRUE)
+  observeEvent(v629_home_name_d(),{ v629_safe("Home roster",isolate(v629_refresh_side_slots("Home"))) },ignoreInit=TRUE)
   
   v628_collect_lineup_slots <- function(side){
     prefix <- if(identical(side,"Home"))"v628_home_slot_" else "v628_away_slot_"
@@ -14096,6 +14113,18 @@ server <- function(input, output, session) {
   }
   
   output$v628_game_lineups_ui <- renderUI({
+    v629_lineups_ui_body()
+  })
+  v629_lineups_ui_body <- function(){
+    tryCatch(v629_lineups_ui_inner(), error=function(e){
+      msg <- paste0("Lineup box error: ", conditionMessage(e)); message("*** ", msg)
+      div(class="game-state-box", style="border:2px solid #A7191F;",
+          div(class="game-state-title","Game Lineups"),
+          div(style="color:#A7191F;font-weight:800;", msg),
+          div(class="admin-note","Screenshot this message for Claude. You can still chart by picking the batter from the Batter dropdown."))
+    })
+  }
+  v629_lineups_ui_inner <- function(){
     if(!isTRUE(v628_lineups_ready()) || isTRUE(v628_lineup_editing())){
       return(div(class="game-state-box",
                  div(class="game-state-title","Game Lineups"),
@@ -14141,7 +14170,7 @@ server <- function(input, output, session) {
         ),
         uiOutput("v628_current_batter_card")
     )
-  })
+  }
   v628_view_side_state <- reactiveVal("Away")
   observeEvent(input$v628_view_away,{v628_view_side_state("Away")})
   observeEvent(input$v628_view_home,{v628_view_side_state("Home")})
@@ -14223,7 +14252,7 @@ server <- function(input, output, session) {
     tryCatch({
       v628_refresh_opponents(); d<-v628_read_sheet("Game_Lineups","A1:K10000")
       if(nrow(d)>0&&all(c("Session_ID","Side","Lineup_Spot","Player_ID")%in%names(d))){
-        d<-d[as.character(d$Session_ID)==as.character(current_session_id()),,drop=FALSE]
+        d<-d[which(as.character(d$Session_ID)==as.character(current_session_id())),,drop=FALSE]
         if(nrow(d)>0){
           d$Lineup_Spot<-suppressWarnings(as.integer(d$Lineup_Spot));d$.row_order<-seq_len(nrow(d))
           # V62.9: a lineup can be saved several times (edits) and SUBs add single
@@ -14259,7 +14288,10 @@ server <- function(input, output, session) {
         }
       }
       v628_refresh_lineup_choices()
-    },error=function(e){})
+    },error=function(e){
+      msg<-paste0("Lineup load error: ",conditionMessage(e)); message("*** ",msg)
+      save_status(msg); showNotification(msg,type="error",duration=NULL)
+    })
   },ignoreInit=TRUE,priority=20)
   
   # ==================================================
@@ -14317,12 +14349,12 @@ server <- function(input, output, session) {
   
   # A new session starts with its saved starting pitchers (if any).
   # Home team pitches the TOP half; away team pitches the BOTTOM half.
-  observeEvent(input$session_select,{
+  observeEvent(input$session_select,{ v629_safe("Starting pitchers",{
     v629_undo_stack(list())
-    v629_half_pitchers(list(Top=v629_home_sp(),Bottom=v629_away_sp()))
-    sp <- v629_half_pitchers()[[v629_current_half()]]
+    v629_half_pitchers(list(Top=v60_chr(v629_home_sp(),""),Bottom=v60_chr(v629_away_sp(),"")))
+    sp <- v60_chr(v629_half_pitchers()[[v629_current_half()]],"")
     if(nzchar(sp)) updateSelectInput(session,"pitcher",selected=sp)
-  },ignoreInit=TRUE)
+  })},ignoreInit=TRUE)
   
   # Safety check used before every live pitch is saved. If this half has no
   # remembered pitcher and the dropdown still shows the OTHER half's pitcher,
