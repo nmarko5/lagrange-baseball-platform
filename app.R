@@ -7821,6 +7821,8 @@ server <- function(input, output, session) {
   pitcher_team_pitches <- reactive({
     d <- p_live_only(pitcher_report_pitches_raw())
     if(nrow(d)==0 || !"Pitcher_ID"%in%names(d)) return(d)
+    # V63: the staff baseline is OUR pitchers only (not opponent pitchers).
+    d <- d[!grepl("^OPP_",as.character(d$Pitcher_ID)),,drop=FALSE]
     sd<-p_session_dates()
     if(nrow(sd)>0&&"Session_ID"%in%names(d)){
       d$Session_ID<-as.character(d$Session_ID);d<-merge(d,sd,by="Session_ID",all.x=TRUE,sort=FALSE)
@@ -8053,7 +8055,7 @@ server <- function(input, output, session) {
   lb_hitter_rows<-reactive({
     p<-leaderboard_pitches();pa<-leaderboard_pas()
     ids<-unique(c(if(nrow(p)>0&&"Batter_ID"%in%names(p))as.character(p$Batter_ID)else character(0),if(nrow(pa)>0&&"Batter_ID"%in%names(pa))as.character(pa$Batter_ID)else character(0)))
-    ids<-ids[!is.na(ids)&ids!=""];if(length(ids)==0)return(data.frame())
+    ids<-ids[!is.na(ids)&ids!=""&!grepl("^OPP_",ids)];if(length(ids)==0)return(data.frame())
     do.call(rbind,lapply(ids,function(id){
       pd<-if(nrow(p)>0&&"Batter_ID"%in%names(p))p[as.character(p$Batter_ID)==id,,drop=FALSE]else data.frame()
       ad<-if(nrow(pa)>0&&"Batter_ID"%in%names(pa))pa[as.character(pa$Batter_ID)==id,,drop=FALSE]else data.frame()
@@ -8074,7 +8076,7 @@ server <- function(input, output, session) {
   
   lb_pitcher_rows<-reactive({
     p<-leaderboard_pitches();pa<-leaderboard_pas();if(nrow(p)==0||!"Pitcher_ID"%in%names(p))return(data.frame())
-    ids<-unique(as.character(p$Pitcher_ID));ids<-ids[!is.na(ids)&ids!=""]
+    ids<-unique(as.character(p$Pitcher_ID));ids<-ids[!is.na(ids)&ids!=""&!grepl("^OPP_",ids)]
     mr<-Filter(Negate(is.null),lapply(ids,function(id){m<-p_metrics_from_data(p[as.character(p$Pitcher_ID)==id,,drop=FALSE]);if(is.null(m))return(NULL);data.frame(Player_ID=id,FPS_Pct=m$fps,Strike_Pct=m$strike,Zone_Pct=m$zone,Whiff_Pct=m$whiff,Chase_Pct=m$chase,Ahead_Pct=m$ahead,Behind_Pct=m$behind,Early_Contact_Pct=m$early_contact,Efficient_Inning_Pct=m$eff,Avg_Pitches_Inning=m$api,stringsAsFactors=FALSE)}))
     if(length(mr)==0)return(data.frame());met<-do.call(rbind,mr);mn<-setdiff(names(met),"Player_ID");staff<-lapply(mn,function(nm){x<-suppressWarnings(as.numeric(met[[nm]]));x<-x[is.finite(x)];if(length(x)==0)NA_real_ else mean(x)});names(staff)<-mn
     do.call(rbind,lapply(seq_len(nrow(met)),function(i){
@@ -9261,17 +9263,22 @@ server <- function(input, output, session) {
   }
   
   
+  # V63: team (hitting) report = OUR hitters only; opponent batters are excluded.
+  v630_no_opp_batters <- function(d){
+    if(is.null(d) || !is.data.frame(d) || nrow(d)==0 || !"Batter_ID"%in%names(d)) return(d)
+    d[!grepl("^OPP_",as.character(d$Batter_ID)),,drop=FALSE]
+  }
   team_report_pitches <- reactive({
-    team_report_filter_frame(
+    v630_no_opp_batters(team_report_filter_frame(
       p_live_only(v6273_scope_org(pitcher_report_pitches_raw()))
-    )
+    ))
   })
   
   
   team_report_pas <- reactive({
-    team_report_filter_frame(
+    v630_no_opp_batters(team_report_filter_frame(
       v6273_scope_org(pitcher_report_pa_raw())
-    )
+    ))
   })
   
   
@@ -10617,7 +10624,7 @@ server <- function(input, output, session) {
         "pitches"
       )
       pitches_data <- v6273_scope_org(pitches_data)
-      report_pitches(pitches_data)
+      report_pitches(v630_no_opp_batters(pitches_data))
       sessions_admin_pitches(pitches_data)
       report_load_error(NULL)
     }, error=function(e){
@@ -10636,7 +10643,7 @@ server <- function(input, output, session) {
         "pa"
       )
       pa_data <- v6273_scope_org(pa_data)
-      report_plate_appearances(pa_data)
+      report_plate_appearances(v630_no_opp_batters(pa_data))
       sessions_admin_pas(pa_data)
     }, error=function(e){
       report_plate_appearances(data.frame())
@@ -13908,8 +13915,11 @@ server <- function(input, output, session) {
       }
     }
     if(nrow(o)>0 && "Opponent_Player_ID"%in%names(o)){
-      z<-o[as.character(o$Opponent_Player_ID)==id,,drop=FALSE]
-      if(nrow(z)>0)return(as.character(z$Display_Name[1]))
+      z<-o[which(as.character(o$Opponent_Player_ID)==id),,drop=FALSE]
+      if(nrow(z)>0){
+        j<-if("Jersey_Number"%in%names(z))v60_chr(z$Jersey_Number[1],"")else""
+        return(paste0(if(nzchar(j))paste0("#",j," ")else"",as.character(z$Display_Name[1])))
+      }
     }
     id
   }
@@ -13962,20 +13972,29 @@ server <- function(input, output, session) {
   })
   v628_write_lineup_side <- function(side,team_type,team_name,lineup){
     if(length(lineup)==0)return(invisible(TRUE))
-    for(i in seq_along(lineup)){
-      append_row_atomic("Game_Lineups",list(unique_record_id("LINEUP"),current_org_id(),current_session_id(),side,team_type,team_name,i,as.character(lineup[[i]]),ifelse(team_type=="Our","Organization","Opponent"),"TRUE",format(Sys.time(),"%Y-%m-%d %H:%M:%S")))
-    }
+    # V63: write the whole batting order in ONE call (faster, fewer Google limits).
+    n <- length(lineup)
+    df <- data.frame(
+      Lineup_Record_ID=vapply(seq_len(n),function(i)unique_record_id("LINEUP"),character(1)),
+      Organization_ID=current_org_id(), Session_ID=current_session_id(), Side=side,
+      Team_Type=team_type, Team_Name=team_name, Lineup_Spot=seq_len(n),
+      Player_ID=as.character(unlist(lineup)), Player_Source=ifelse(identical(team_type,"Our"),"Organization","Opponent"),
+      Active="TRUE", Created_At=format(Sys.time(),"%Y-%m-%d %H:%M:%S"),
+      stringsAsFactors=FALSE)
+    v629_sheet_append(ss=SHEET_URL,data=df,sheet="Game_Lineups")
+    invisible(TRUE)
   }
   observeEvent(input$v628_save_lineups,{
     req(current_session_id())
-    away<-v628_collect_lineup_slots("Away"); home<-v628_collect_lineup_slots("Home")
+    away<-tryCatch(v630_collect_side("Away"),error=function(e){save_status(paste0("Away lineup error: ",e$message));character(0)})
+    home<-tryCatch(v630_collect_side("Home"),error=function(e){save_status(paste0("Home lineup error: ",e$message));character(0)})
     if(length(away)==0||length(home)==0){save_status("Add at least one hitter to both lineups before saving.");return()}
     tryCatch({
       v628_ensure_game_architecture()
-      v628_write_lineup_side("Away",input$v628_away_type,trimws(input$v628_away_name),away)
-      v628_write_lineup_side("Home",input$v628_home_type,trimws(input$v628_home_name),home)
+      v628_write_lineup_side("Away",v630_side_type("Away"),if(identical(v630_side_type("Away"),"Opponent"))v630_side_team("Away")else trimws(v60_chr(input$v628_away_name,"")),away)
+      v628_write_lineup_side("Home",v630_side_type("Home"),if(identical(v630_side_type("Home"),"Opponent"))v630_side_team("Home")else trimws(v60_chr(input$v628_home_name,"")),home)
       # V62.9: starting pitchers (lineup spot 0).
-      new_away_sp<-v60_chr(input$v629_away_sp_pick,""); new_home_sp<-v60_chr(input$v629_home_sp_pick,"")
+      new_away_sp<-v630_sp_for_side("Away"); new_home_sp<-v630_sp_for_side("Home")
       for(sp_side in c("Away","Home")){
         sp_id<-if(sp_side=="Away")new_away_sp else new_home_sp
         if(!nzchar(sp_id))next
@@ -14044,6 +14063,28 @@ server <- function(input, output, session) {
     # name doesn't rebuild this box (which kicked the cursor out).
     team_name <- isolate(if(is_home)v60_chr(input$v628_home_name,v628_home_team_name()) else v60_chr(input$v628_away_name,v628_away_team_name()))
     current <- if(is_home)v628_home_lineup() else v628_away_lineup()
+    # V63: an OPPONENT lineup is typed in (jersey # + name). New players are
+    # saved automatically when the lineup is saved, so they're there next time.
+    if(identical(team_type,"Opponent")){
+      sd <- tolower(side)
+      return(tagList(
+        div(class="admin-note",style="margin:0 0 8px 0;","Type the opponent's batting order: jersey #, name, and which side he bats. Leave extra spots blank."),
+        lapply(seq_len(12L),function(i){
+          sid <- if(i<=length(current))as.character(current[[i]])else""
+          pre <- v630_opp_lookup(sid)
+          num_id <- paste0("v630_",sd,"_num_",i); nm_id <- paste0("v630_",sd,"_name_",i); bt_id <- paste0("v630_",sd,"_bats_",i)
+          num_v <- isolate(input[[num_id]]); nm_v <- isolate(input[[nm_id]]); bt_v <- isolate(input[[bt_id]])
+          div(
+            class="v630-opp-row",
+            style="display:grid;grid-template-columns:42px 64px minmax(0,1fr) 78px;align-items:center;gap:8px;margin-bottom:6px;",
+            div(style="height:38px;border-radius:8px;background:#f1f3f5;display:flex;align-items:center;justify-content:center;font-weight:900;color:#555;",i),
+            textInput(num_id,label=NULL,value=if(!is.null(num_v))num_v else pre[["num"]],placeholder="#",width="100%"),
+            textInput(nm_id,label=NULL,value=if(!is.null(nm_v))nm_v else pre[["name"]],placeholder="Player name",width="100%"),
+            selectInput(bt_id,label=NULL,choices=c("Bats"="","R","L","S"),selected=if(!is.null(bt_v))bt_v else pre[["bats"]],selectize=FALSE,width="100%")
+          )
+        })
+      ))
+    }
     choices <- v628_choices_for(team_type,team_name)
     tagList(lapply(seq_len(12L),function(i){
       # Keep any hitter already picked in this slot if the box rebuilds.
@@ -14092,6 +14133,19 @@ server <- function(input, output, session) {
     sp_id <- if(is_home)"v629_home_sp_pick" else "v629_away_sp_pick"
     team_type <- if(is_home)v60_chr(input$v628_home_type,v628_home_team_type()) else v60_chr(input$v628_away_type,v628_away_team_type())
     team_name <- isolate(if(is_home)v60_chr(input$v628_home_name,v628_home_team_name()) else v60_chr(input$v628_away_name,v628_away_team_name()))
+    if(identical(team_type,"Opponent")){
+      sd <- tolower(side)
+      pre <- v630_opp_lookup(isolate(if(is_home)v629_home_sp() else v629_away_sp()))
+      num_id <- paste0("v630_",sd,"_sp_num"); nm_id <- paste0("v630_",sd,"_sp_name"); th_id <- paste0("v630_",sd,"_sp_throws")
+      num_v <- isolate(input[[num_id]]); nm_v <- isolate(input[[nm_id]]); th_v <- isolate(input[[th_id]])
+      return(div(
+        tags$label(style="font-weight:700;",paste0(side," Starting Pitcher")),
+        div(style="display:grid;grid-template-columns:64px minmax(0,1fr) 92px;gap:8px;",
+            textInput(num_id,label=NULL,value=if(!is.null(num_v))num_v else pre[["num"]],placeholder="#",width="100%"),
+            textInput(nm_id,label=NULL,value=if(!is.null(nm_v))nm_v else pre[["name"]],placeholder="Pitcher name",width="100%"),
+            selectInput(th_id,label=NULL,choices=c("Throws"="","R","L"),selected=if(!is.null(th_v))th_v else pre[["throws"]],selectize=FALSE,width="100%"))
+      ))
+    }
     picked <- isolate(input[[sp_id]])
     selected <- if(!is.null(picked)) as.character(picked) else isolate(if(is_home)v629_home_sp() else v629_away_sp())
     selectInput(sp_id,paste0(side," Starting Pitcher"),
@@ -14102,6 +14156,72 @@ server <- function(input, output, session) {
   v629_home_name_d <- debounce(reactive(input$v628_home_name),1000)
   observeEvent(v629_away_name_d(),{ v629_safe("Away roster",isolate(v629_refresh_side_slots("Away"))) },ignoreInit=TRUE)
   observeEvent(v629_home_name_d(),{ v629_safe("Home roster",isolate(v629_refresh_side_slots("Home"))) },ignoreInit=TRUE)
+  
+  # V63 — typed opponent lineups
+  v630_opp_lookup <- function(id){
+    out <- list(num="", name="", bats="", throws="")
+    id <- v60_chr(id,""); if(!nzchar(id)) return(out)
+    o <- v628_opponent_players()
+    if(nrow(o)==0 || !"Opponent_Player_ID"%in%names(o)) return(out)
+    z <- o[which(as.character(o$Opponent_Player_ID)==id),,drop=FALSE]
+    if(nrow(z)==0) return(out)
+    list(num=v60_chr(z$Jersey_Number[1],""), name=v60_chr(z$Display_Name[1],""),
+         bats=if("Bats"%in%names(z))v60_chr(z$Bats[1],"")else"", throws=if("Throws"%in%names(z))v60_chr(z$Throws[1],"")else"")
+  }
+  # entries: list of c(num, name). Reuses a saved opponent player when the team,
+  # name and number match; otherwise creates one. All new players are written
+  # to the sheet in ONE call.
+  v630_resolve_opponents <- function(entries, team){
+    team <- v60_chr(team,"Opponent")
+    o <- v628_opponent_players()
+    ids <- character(length(entries)); new_rows <- list(); made <- list()
+    for(k in seq_along(entries)){
+      num <- sub("^#","",trimws(entries[[k]][1])); nm <- trimws(entries[[k]][2])
+      key <- tolower(paste(nm,num,sep="|"))
+      if(!is.null(made[[key]])){ ids[k] <- made[[key]]; next }
+      hit <- integer(0)
+      if(nrow(o)>0 && all(c("Opponent_Player_ID","Opponent_Team","Display_Name")%in%names(o))){
+        jn <- if("Jersey_Number"%in%names(o)) trimws(as.character(o$Jersey_Number)) else rep("",nrow(o))
+        jn[is.na(jn)] <- ""
+        hit <- which(tolower(trimws(as.character(o$Opponent_Team)))==tolower(team) &
+                     tolower(trimws(as.character(o$Display_Name)))==tolower(nm) & jn==num)
+      }
+      if(length(hit)>0){ ids[k] <- as.character(o$Opponent_Player_ID[hit[1]]); made[[key]] <- ids[k]; next }
+      uid <- unique_record_id("P")
+      oid <- paste0("OPP_",v60_slug(team),"_",v60_slug(nm),"_",substr(uid,max(1,nchar(uid)-5),nchar(uid)))
+      ids[k] <- oid; made[[key]] <- oid
+      bats <- if(length(entries[[k]])>=3) v60_chr(entries[[k]][3],"") else ""
+      throws <- if(length(entries[[k]])>=4) v60_chr(entries[[k]][4],"") else ""
+      new_rows[[length(new_rows)+1]] <- c(oid,current_org_id(),team,nm,num,bats,throws,"TRUE")
+    }
+    if(length(new_rows)>0){
+      df <- as.data.frame(do.call(rbind,new_rows),stringsAsFactors=FALSE)
+      v628_ensure_game_architecture()
+      v629_sheet_append(ss=SHEET_URL,data=df,sheet="Opponent_Players")
+      v628_refresh_opponents()
+    }
+    ids
+  }
+  v630_side_type <- function(side) v60_chr(input[[paste0("v628_",tolower(side),"_type")]],"Our")
+  v630_side_team <- function(side) v60_chr(input[[paste0("v628_",tolower(side),"_name")]],"Opponent")
+  v630_collect_side <- function(side){
+    if(!identical(v630_side_type(side),"Opponent")) return(v628_collect_lineup_slots(side))
+    sd <- tolower(side); entries <- list()
+    for(i in seq_len(12L)){
+      nm <- v60_chr(input[[paste0("v630_",sd,"_name_",i)]],"")
+      if(!nzchar(nm)) next
+      entries[[length(entries)+1]] <- c(v60_chr(input[[paste0("v630_",sd,"_num_",i)]],""), nm, v60_chr(input[[paste0("v630_",sd,"_bats_",i)]],""), "")
+    }
+    if(length(entries)==0) return(character(0))
+    v630_resolve_opponents(entries, v630_side_team(side))
+  }
+  v630_sp_for_side <- function(side){
+    sd <- tolower(side)
+    if(!identical(v630_side_type(side),"Opponent")) return(v60_chr(input[[paste0("v629_",sd,"_sp_pick")]],""))
+    nm <- v60_chr(input[[paste0("v630_",sd,"_sp_name")]],"")
+    if(!nzchar(nm)) return("")
+    v630_resolve_opponents(list(c(v60_chr(input[[paste0("v630_",sd,"_sp_num")]],""), nm, "", v60_chr(input[[paste0("v630_",sd,"_sp_throws")]],""))), v630_side_team(side))[1]
+  }
   
   v628_collect_lineup_slots <- function(side){
     prefix <- if(identical(side,"Home"))"v628_home_slot_" else "v628_away_slot_"
@@ -17806,6 +17926,9 @@ server <- function(input, output, session) {
     
     batter_choices <- make_choices(d[batter_rows,,drop=FALSE])
     pitcher_choices <- make_choices(d[pitcher_rows,,drop=FALSE])
+    # V63: keep saved opponent pitchers selectable too, so a roster reload
+    # mid-game never drops the opponent's pitcher from the dropdown.
+    pitcher_choices <- c(pitcher_choices, tryCatch(isolate(v628_choices_for("Opponent","")),error=function(e)character(0)))
     
     if(length(batter_choices)>0){
       current_b <- isolate(input$batter)
